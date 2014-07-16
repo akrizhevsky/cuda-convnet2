@@ -25,16 +25,7 @@ import os
 import cPickle
 import scipy.io
 import math
-
-# Path to ILSVRC 2012 inputs. This should contain the three tar files that 
-# you get when you download ILSVRC 2012:
-#    ILSVRC2012_img_train.tar
-#    ILSVRC2012_img_val.tar
-#    ILSVRC2012_devkit_t12.tar.gz
-ILSVRC_SRC_DIR = '/usr/local/storage/akrizhevsky/'
-
-# Path to output ILSVRC 2012 batches suitable for cuda-convnet to train on.
-TARGET_DIR = '/usr/local/storage/akrizhevsky/tmp/ilsvrc-2012'
+import argparse as argp
 
 # Set this to True to crop images to square. In this case each image will be
 # resized such that its shortest edge is OUTPUT_IMAGE_SIZE pixels, and then the
@@ -51,12 +42,8 @@ OUTPUT_IMAGE_SIZE       = 256
 NUM_WORKER_THREADS      = 8
 
 # Don't worry about these.
-OUTPUT_BATCH_SIZE = 8192
-OUTPUT_SUB_BATCH_SIZE = 2048
-
-ILSVRC_TRAIN_TAR = os.path.join(ILSVRC_SRC_DIR, 'ILSVRC2012_img_train.tar')
-ILSVRC_VALIDATION_TAR = os.path.join(ILSVRC_SRC_DIR, 'ILSVRC2012_img_val.tar')
-ILSVRC_DEVKIT_TAR = os.path.join(ILSVRC_SRC_DIR, 'ILSVRC2012_devkit_t12.tar.gz')
+OUTPUT_BATCH_SIZE = 3072
+OUTPUT_SUB_BATCH_SIZE = 1024
 
 def pickle(filename, data):
     with open(filename, "w") as fo:
@@ -82,7 +69,7 @@ def makedir(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
-def parse_devkit_meta():
+def parse_devkit_meta(ILSVRC_DEVKIT_TAR):
     tf = open_tar(ILSVRC_DEVKIT_TAR, 'devkit tar')
     fmeta = tf.extractfile(tf.getmember('ILSVRC2012_devkit_t12/data/meta.mat'))
     meta_mat = scipy.io.loadmat(StringIO(fmeta.read()))
@@ -95,15 +82,15 @@ def parse_devkit_meta():
     tf.close()
     return labels_dic, label_names, validation_ground_truth
 
-def write_batches(name, start_batch_num, labels, jpeg_files):
+def write_batches(target_dir, name, start_batch_num, labels, jpeg_files):
     jpeg_files = partition_list(jpeg_files, OUTPUT_BATCH_SIZE)
     labels = partition_list(labels, OUTPUT_BATCH_SIZE)
-    makedir(TARGET_DIR)
+    makedir(target_dir)
     print "Writing %s batches..." % name
     for i,(labels_batch, jpeg_file_batch) in enumerate(zip(labels, jpeg_files)):
         t = time()
         jpeg_strings = list(itertools.chain.from_iterable(resizeJPEG([jpeg.read() for jpeg in jpeg_file_batch], OUTPUT_IMAGE_SIZE, NUM_WORKER_THREADS, CROP_TO_SQUARE)))
-        batch_path = os.path.join(TARGET_DIR, 'data_batch_%d' % (start_batch_num + i))
+        batch_path = os.path.join(target_dir, 'data_batch_%d' % (start_batch_num + i))
         makedir(batch_path)
         for j in xrange(0, len(labels_batch), OUTPUT_SUB_BATCH_SIZE):
             pickle(os.path.join(batch_path, 'data_batch_%d.%d' % (start_batch_num + i, j/OUTPUT_SUB_BATCH_SIZE)), 
@@ -113,14 +100,21 @@ def write_batches(name, start_batch_num, labels, jpeg_files):
     return i + 1
 
 if __name__ == "__main__":
-    print "ILSVRC_SRC_DIR: %s" % ILSVRC_SRC_DIR
-    print "TARGET_DIR: %s" % TARGET_DIR
+    parser = argp.ArgumentParser()
+    parser.add_argument('--src-dir', help='Directory containing ILSVRC2012_img_train.tar, ILSVRC2012_img_val.tar, and ILSVRC2012_devkit_t12.tar.gz', required=True)
+    parser.add_argument('--tgt-dir', help='Directory to output ILSVRC 2012 batches suitable for cuda-convnet to train on.', required=True)
+    args = parser.parse_args()
+    
     print "CROP_TO_SQUARE: %s" % CROP_TO_SQUARE
     print "OUTPUT_IMAGE_SIZE: %s" % OUTPUT_IMAGE_SIZE
     print "NUM_WORKER_THREADS: %s" % NUM_WORKER_THREADS
 
+    ILSVRC_TRAIN_TAR = os.path.join(args.src_dir, 'ILSVRC2012_img_train.tar')
+    ILSVRC_VALIDATION_TAR = os.path.join(args.src_dir, 'ILSVRC2012_img_val.tar')
+    ILSVRC_DEVKIT_TAR = os.path.join(args.src_dir, 'ILSVRC2012_devkit_t12.tar.gz')
+
     assert OUTPUT_BATCH_SIZE % OUTPUT_SUB_BATCH_SIZE == 0
-    labels_dic, label_names, validation_labels = parse_devkit_meta()
+    labels_dic, label_names, validation_labels = parse_devkit_meta(ILSVRC_DEVKIT_TAR)
     
     with open_tar(ILSVRC_TRAIN_TAR, 'training tar') as tf:
         synsets = tf.getmembers()
@@ -142,20 +136,20 @@ if __name__ == "__main__":
         print "done"
     
         # Write training batches
-        i = write_batches('training', 0, train_labels, train_jpeg_files)
+        i = write_batches(args.tgt_dir, 'training', 0, train_labels, train_jpeg_files)
     
     # Write validation batches
     val_batch_start = int(math.ceil((i / 1000.0))) * 1000
     with open_tar(ILSVRC_VALIDATION_TAR, 'validation tar') as tf:
         validation_jpeg_files = [tf.extractfile(m) for m in tf.getmembers()]
-        write_batches('validation', val_batch_start, validation_labels, validation_jpeg_files)
+        write_batches(args.tgt_dir, 'validation', val_batch_start, validation_labels, validation_jpeg_files)
     
     # Write meta file
     meta = unpickle('input_meta')
-    meta_file = os.path.join(TARGET_DIR, 'batches.meta')
+    meta_file = os.path.join(args.tgt_dir, 'batches.meta')
     meta.update({'batch_size': OUTPUT_BATCH_SIZE,
                  'num_vis': OUTPUT_IMAGE_SIZE**2 * 3,
                  'label_names': label_names})
     pickle(meta_file, meta)
     print "Wrote %s" % meta_file
-    print "All done! ILSVRC 2012 batches are in %s" % TARGET_DIR
+    print "All done! ILSVRC 2012 batches are in %s" % args.tgt_dir
