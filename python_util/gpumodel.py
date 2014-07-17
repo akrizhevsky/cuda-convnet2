@@ -305,6 +305,7 @@ class IGPUModel:
         op = OptionsParser()
         op.add_option("load-file", "load_file", StringOptionParser, "Load file", default="", excuses=OptionsParser.EXCUSE_ALL)
         op.add_option("save-path", "save_path", StringOptionParser, "Save path", excuses=['save_file_override'])
+        op.add_option("save-file", "save_file_override", StringOptionParser, "Save file override", excuses=['save_path'])
         op.add_option("train-range", "train_batch_range", RangeOptionParser, "Data batch range: training")
         op.add_option("test-range", "test_batch_range", RangeOptionParser, "Data batch range: testing")
         op.add_option("data-provider", "dp_type", StringOptionParser, "Data provider", default="default")
@@ -332,8 +333,12 @@ class IGPUModel:
             load_dic = None
             options = op.parse()
             load_location = None
+#            print options['load_file'].value_given, options['save_file_override'].value_given
+#            print options['save_file_override'].value
             if options['load_file'].value_given:
                 load_location = options['load_file'].value
+            elif options['save_file_override'].value_given and os.path.exists(options['save_file_override'].value):
+                load_location = options['save_file_override'].value
             
             if load_location is not None:
                 load_dic = IGPUModel.load_checkpoint(load_location)
