@@ -78,7 +78,7 @@ def parse_devkit_meta(ILSVRC_DEVKIT_TAR):
     label_names = [tup[1] for tup in sorted([(v,label_names_dic[k]) for k,v in labels_dic.items()], key=lambda x:x[0])]
 
     fval_ground_truth = tf.extractfile(tf.getmember('ILSVRC2012_devkit_t12/data/ILSVRC2012_validation_ground_truth.txt'))
-    validation_ground_truth = [int(line.strip()) - 1 for line in fval_ground_truth.readlines()]
+    validation_ground_truth = [[int(line.strip()) - 1] for line in fval_ground_truth.readlines()]
     tf.close()
     return labels_dic, label_names, validation_ground_truth
 
@@ -132,7 +132,7 @@ if __name__ == "__main__":
             st.close()
             
         shuffle(train_jpeg_files)
-        train_labels = [labels_dic[jpeg.name[:9]] for jpeg in train_jpeg_files]
+        train_labels = [[labels_dic[jpeg.name[:9]]] for jpeg in train_jpeg_files]
         print "done"
     
         # Write training batches
