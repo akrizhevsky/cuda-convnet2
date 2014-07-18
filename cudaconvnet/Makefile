@@ -30,9 +30,9 @@
 ################################################################################
 
 # Location of the CUDA Toolkit binaries and libraries
-CUDA_INC_PATH  = $(CUDA_PATH)/include
-CUDA_BIN_PATH  = $(CUDA_PATH)/bin
-CUDA_LIB_PATH  = $(CUDA_PATH)/lib64
+CUDA_INC_PATH  = $(CUDA_INSTALL_PATH)/include
+CUDA_BIN_PATH  = $(CUDA_INSTALL_PATH)/bin
+CUDA_LIB_PATH  = $(CUDA_INSTALL_PATH)/lib64
 
 # Common binaries
 NVCC            = $(CUDA_BIN_PATH)/nvcc
@@ -70,7 +70,7 @@ OBJDIR := ./obj/$(DBG)
 PYTHON_VERSION=$(shell python -V 2>&1 | cut -d ' ' -f 2 | cut -d '.' -f 1,2)
 MODELNAME := _ConvNet
 LDFLAGS   += -lpthread -ljpeg -lpython$(PYTHON_VERSION) -L../util -lutilpy -L../nvmatrix -lnvmatrix -L../cudaconv3 -lcudaconv -lcublas -Wl,-rpath=./util -Wl,-rpath=./nvmatrix -Wl,-rpath=./cudaconv3 
-INCLUDES      := -I$(CUDA_INC_PATH) -I $(CUDA_PATH)/samples/common/inc -I./include -I$(PYTHON_INCLUDE) -I$(NUMPY_INCLUDE) 
+INCLUDES      := -I$(CUDA_INC_PATH) -I $(CUDA_SDK_PATH)/common/inc -I./include -I$(PYTHON_INCLUDE_PATH) -I$(NUMPY_INCLUDE_PATH) 
 
 DEFINES := -DNUMPY_INTERFACE
 

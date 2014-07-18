@@ -29,7 +29,7 @@ ifeq ($(numpy), 1)
 	PYTHON_VERSION=$(shell python -V 2>&1 | cut -d ' ' -f 2 | cut -d '.' -f 1,2)
 	LINK_LIBS += -lpython$(PYTHON_VERSION)
 
-	INCLUDES += -I$(PYTHON_INCLUDE) -I$(NUMPY_INCLUDE)
+	INCLUDES += -I$(PYTHON_INCLUDE_PATH) -I$(NUMPY_INCLUDE_PATH)
 	COMMONFLAGS += -DNUMPY_INTERFACE
 	OUT_FILE=libutilpy.so
 endif

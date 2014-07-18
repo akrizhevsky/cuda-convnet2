@@ -31,9 +31,6 @@
 # CUDA toolkit installation directory.
 export CUDA_INSTALL_PATH=/usr/local/cuda
 
-# CUDA SDK installation directory. You shouldn't have to change this.
-export CUDA_SDK_PATH=$CUDA_INSTALL_PATH/samples
-
 # Python include directory. This should contain the file Python.h, among others.
 export PYTHON_INCLUDE_PATH=/usr/include/python2.7
 
@@ -42,6 +39,11 @@ export NUMPY_INCLUDE_PATH=/usr/lib/python2.7/dist-packages/numpy/core/include/nu
 
 # ATLAS library directory. This should contain the file libcblas.so, among others.
 export ATLAS_LIB_PATH=/usr/lib/atlas-base
+
+# You don't have to change these:
+export LD_LIBRARY_PATH=$CUDA_INSTALL_PATH/lib64:$LD_LIBRARY_PATH
+export CUDA_SDK_PATH=$CUDA_INSTALL_PATH/samples
+export PATH=$PATH:$CUDA_INSTALL_PATH/bin
 
 cd util && make numpy=1 -j $* && cd ..
 cd nvmatrix && make -j $* && cd ..

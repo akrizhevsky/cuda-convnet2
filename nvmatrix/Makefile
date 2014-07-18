@@ -30,9 +30,9 @@
 ################################################################################
 
 # Location of the CUDA Toolkit binaries and libraries
-CUDA_INC_PATH  = $(CUDA_PATH)/include
-CUDA_BIN_PATH  = $(CUDA_PATH)/bin
-CUDA_LIB_PATH  = $(CUDA_PATH)/lib64
+CUDA_INC_PATH  = $(CUDA_INSTALL_PATH)/include
+CUDA_BIN_PATH  = $(CUDA_INSTALL_PATH)/bin
+CUDA_LIB_PATH  = $(CUDA_INSTALL_PATH)/lib64
 
 # Common binaries
 NVCC            = $(CUDA_BIN_PATH)/nvcc
@@ -68,7 +68,7 @@ OBJDIR := ./obj/$(DBG)
 
 ########## USER STUFF ###########
 LDFLAGS   		+= -L../util -lutilpy -lcublas
-INCLUDES      	:= -I$(CUDA_INC_PATH) -I $(CUDA_PATH)/samples/common/inc -I./include
+INCLUDES      	:= -I$(CUDA_INC_PATH) -I $(CUDA_SDK_PATH)/common/inc -I./include
 
 CUFILES	:= $(shell find . -name "*.cu")
 CU_DEPS	:= $(shell find . -name "*.cuh")
