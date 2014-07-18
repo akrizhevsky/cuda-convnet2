@@ -48,10 +48,6 @@ def makewcat(name, idx, shape, params):
 def makebcat(name, shape, params):
     src, src_layers = get_src(params[0]), params[1:]
     return concat(shape, src, src_layers, lambda x: x['biases'])
-    
-def makec(name, idx, shape, params):
-    src, src_layer = get_src(), params[0]
-    return src[src_layer]['filterConns'][idx]
 
 # Initialize bias vector from tuple input
 def makeb_vec(name, shape, params):

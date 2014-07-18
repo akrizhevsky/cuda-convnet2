@@ -115,7 +115,7 @@ if __name__ == "__main__":
 
     assert OUTPUT_BATCH_SIZE % OUTPUT_SUB_BATCH_SIZE == 0
     labels_dic, label_names, validation_labels = parse_devkit_meta(ILSVRC_DEVKIT_TAR)
-    
+
     with open_tar(ILSVRC_TRAIN_TAR, 'training tar') as tf:
         synsets = tf.getmembers()
         synset_tars = [tarfile.open(fileobj=tf.extractfile(s)) for s in synsets]
@@ -141,7 +141,7 @@ if __name__ == "__main__":
     # Write validation batches
     val_batch_start = int(math.ceil((i / 1000.0))) * 1000
     with open_tar(ILSVRC_VALIDATION_TAR, 'validation tar') as tf:
-        validation_jpeg_files = [tf.extractfile(m) for m in tf.getmembers()]
+        validation_jpeg_files = sorted([tf.extractfile(m) for m in tf.getmembers()], key=lambda x:x.name)
         write_batches(args.tgt_dir, 'validation', val_batch_start, validation_labels, validation_jpeg_files)
     
     # Write meta file
