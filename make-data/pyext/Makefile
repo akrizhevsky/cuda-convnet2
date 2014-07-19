@@ -26,7 +26,7 @@ OUT_DIR=./bin/$(OUT_SUFFIX)
 PYTHON_VERSION=$(shell python -V 2>&1 | cut -d ' ' -f 2 | cut -d '.' -f 1,2)
 LINK_LIBS := `pkg-config --libs python` `pkg-config --libs opencv` -lpthread
 
-INCLUDES += -I$(PYTHON_INCLUDE) 
+INCLUDES += -I$(PYTHON_INCLUDE_PATH) 
 OUT_FILE=_MakeDataPyExt.so
 
 all: dir classes $(OUT_FILE)
