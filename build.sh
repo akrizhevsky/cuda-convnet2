@@ -49,5 +49,5 @@ cd util && make numpy=1 -j $* && cd ..
 cd nvmatrix && make -j $* && cd ..
 cd cudaconv3 && make -j $* && cd ..
 cd cudaconvnet && make -j $* && cd ..
-cd make-data/pyext && make -j && cd ../..
+cd make-data/pyext && make -j $* && cd ../..
 
