@@ -40,7 +40,7 @@ class CheckpointWriter(Thread):
         save_dir = os.path.dirname(self.path)
         save_file = os.path.basename(self.path)
         # Write checkpoint to temporary filename
-        tmpfile = tf.NamedTemporaryFile(prefix=os.path.dirname(save_dir), delete=False)
+        tmpfile = tf.NamedTemporaryFile(dir=os.path.dirname(save_dir), delete=False)
         pickle(tmpfile, self.dic) # Also closes tf
         # Move it to final filename
         os.rename(tmpfile.name, self.path)
