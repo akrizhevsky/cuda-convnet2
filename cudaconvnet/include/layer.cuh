@@ -99,7 +99,7 @@ protected:
     int _numGradProducersNext;
     int _actsTarget, _actsGradTarget;
     std::string _name, _type;
-    intv _nextDeviceIDs;
+    intv _nextDeviceIDs, _prevDeviceIDs;
     HostNVMatrix _hostMemFwd;
 
     // New replica-related stuff:
@@ -193,6 +193,9 @@ public:
     virtual void copyToCPU() {
     }
     virtual void copyToGPU()  {
+    }
+    intv& getNextDeviceIDs() {
+        return _nextDeviceIDs;
     }
 
     int getReplicaID();
@@ -438,9 +441,6 @@ public:
     void waitForCopyFinish();
     int getDataIdx() const {
         return _dataIdx;
-    }
-    intv& getNextDeviceIDs() {
-        return _nextDeviceIDs;
     }
     int getStart() const {
         return _start;

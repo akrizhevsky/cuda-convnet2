@@ -86,7 +86,9 @@ void Layer::syncStream() {
 void Layer::fpropNext(PASS_TYPE passType, int passIdx) {
     if (_next.size() > 0) {
         if (getFwdActiveReplicaIdx(passIdx) == 0/*getReplicaIdx()*/) { // 0 turns on pipelining
-            syncStream(); // Make sure I've finished computing before broadcasting
+            if (_nextDeviceIDs.size() > 1 || (_nextDeviceIDs.size() == 1 && _nextDeviceIDs[0] != getDeviceID())) {
+                syncStream(); // Make sure I've finished computing before broadcasting
+            }
             getActBroadcaster().getMessageQueue().enqueue(new BroadcastMessage(getAllActs(), getDeviceID(), getReplicaIdx(), _broadcastFinishQueue));
         }
         if (getFwdActiveReplicaIdx(passIdx) == getReplicaIdx()) {
@@ -204,10 +206,13 @@ void Layer::bpropActsCall(NVMatrix& v, PASS_TYPE passType, int replicaIdx, int i
     Layer& prev = *_prev[replicaIdx][inputIdx];
     if (prev.isGradConsumer() && isGradProducer(prev.getName())) {
         if (v.getLeadingDim() > 0) { // Only do computation if #cases > 0
-            bpropActs(v, replicaIdx, inputIdx, prev.getNumComputedActsGrads(getDeviceID()) > 0 ? 1 : 0, passType);
+            bpropActs(v, replicaIdx, inputIdx, prev.getNumComputedActsGrads(getDeviceID()) > 0, passType);
         }
         prev.getNumComputedActsGrads(getDeviceID())++;
-        if (_type != "pass") {
+        // Synchronize if the previous layer is going to actually do a reduction.
+        // If the previous layer is on the same GPU as us and has no next layers
+        // on other GPUs then it won't need to do a reduction. 
+        if (prev.getNextDeviceIDs().size() > 1 || (prev.getNextDeviceIDs().size() == 1 && getDeviceID() != prev.getDeviceID())) {
             syncStream();
         }
         prev.getGradReducer().enqueueReduction(getDeviceID());
@@ -253,9 +258,11 @@ void Layer::bprop(NVMatrix& v, PASS_TYPE passType, int passIdx) {
 
     // Synchronization is necessary because the kernel calls that compute my backward acts
     // execute asynchronously. Therefore I don't want to tell other threads that I've
-    // comptued bprop activities for them when in fact I've only called a function which
+    // computed bprop activities for them when in fact I've only called a function which
     // will eventually compute them.
-    syncStream();
+    if (_prevDeviceIDs.size() > 1 || (_prevDeviceIDs.size() == 1 && _prevDeviceIDs[0] != getDeviceID())) {
+        syncStream();
+    }
 
     if (getConvNet().isConserveMemory()) {
         truncBwdActs();
@@ -338,6 +345,10 @@ void Layer::addPrev(Layer& l, int replicaIdx) {
     _prev[replicaIdx].push_back(&l);
     _numReplicasPrev = l.getNumReplicas();
     l.setInputIdx(getName(), _prev[replicaIdx].size() - 1);
+    if (l.getDeviceID() >= 0 && count(_prevDeviceIDs.begin(), _prevDeviceIDs.end(), l.getDeviceID()) == 0) {
+        int pos = rand() % (_prevDeviceIDs.size() + 1);
+        _prevDeviceIDs.insert(_prevDeviceIDs.begin() + pos, l.getDeviceID());
+    }
 }
 
 void Layer::addReplica(Layer& l) {
