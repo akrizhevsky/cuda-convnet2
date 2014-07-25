@@ -15,7 +15,7 @@
  */
 
 #ifndef LR_CUH
-#define	LR_CUH
+#define LR_CUH
 
 #include <string>
 #include <vector>
@@ -36,39 +36,39 @@
  */
 class ParameterSchedule {
 protected:
-	double _baseRate;
+    double _baseRate;
 public:
-	ParameterSchedule(double base);
-	virtual double getValue(double progress);
-	double getBaseValue() const;
-	virtual ~ParameterSchedule();
+    ParameterSchedule(double base);
+    virtual double getValue(double progress);
+    double getBaseValue() const;
+    virtual ~ParameterSchedule();
 
-	static ParameterSchedule& make(PyObject* schedDict);
+    static ParameterSchedule& make(PyObject* schedDict);
 };
 
 class LinearParameterSchedule : public ParameterSchedule {
 protected:
-	double _finalRate;
+    double _finalRate;
 public:
-	LinearParameterSchedule(double base, double tgtFactor);
-	virtual double getValue(double progress);
+    LinearParameterSchedule(double base, double tgtFactor);
+    virtual double getValue(double progress);
 };
 
 class ExpParameterSchedule : public ParameterSchedule {
 protected:
-	double _powBase;
+    double _powBase;
 public:
-	ExpParameterSchedule(double baseRate, double tgtFactor);
-	virtual double getValue(double progress);
+    ExpParameterSchedule(double baseRate, double tgtFactor);
+    virtual double getValue(double progress);
 };
 
 class DiscreteExpParameterSchedule : public ParameterSchedule {
 protected:
-	std::vector<double> _rates;
+    std::vector<double> _rates;
 public:
-	DiscreteExpParameterSchedule(double baseRate, double tgtFactor, int numSteps);
-	virtual double getValue(double progress);
+    DiscreteExpParameterSchedule(double baseRate, double tgtFactor, int numSteps);
+    virtual double getValue(double progress);
 };
 
 
-#endif	/* LR_CUH */
+#endif    /* LR_CUH */

@@ -49,7 +49,6 @@ PyObject* resizeJPEG(PyObject *self, PyObject *args) {
 
         threads[t] = new DecoderThread((PyObject*)pyListSrc, start_img, end_img, tgtImgSize, cropToSquare);
         threads[t]->start();
-
     }
 
     PyObject* pyListTgt = PyList_New(0);
