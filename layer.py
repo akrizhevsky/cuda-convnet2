@@ -1296,7 +1296,7 @@ class CrossMapPoolLayerParser(LayerWithInputParser):
         dic['imgSize'] = int(n.sqrt(dic['imgPixels']))
         dic['outputs'] = dic['outputChannels'] * dic['imgPixels']
         
-        self.verify_num_range(dic['size'], 'size', 1, dic['imgSize'])
+        self.verify_num_range(dic['size'], 'size', 1, dic['channels'])
         self.verify_num_range(dic['stride'], 'stride', 1, dic['size'])
         self.verify_num_range(dic['outputChannels'], 'outputChannels', 0, None)
         self.verify_num_range(dic['channels'], 'channels', 1, None)
