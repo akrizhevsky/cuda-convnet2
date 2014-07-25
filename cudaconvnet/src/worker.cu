@@ -67,7 +67,7 @@ DataWorker::DataWorker(ConvNet& convNet, CPUData& data) : Worker(convNet), _data
 }
 
 DataWorker::~DataWorker() {
-    _dp->clearData();
+    
 }
 
 /* 

@@ -218,6 +218,7 @@ void* ConvNet::run() {
         Worker* worker = _workerQueue.dequeue();
         exit = worker->run();
         delete worker;
+        _dp->clearData();
     }
 
     return NULL;
