@@ -60,14 +60,19 @@ Worker::~Worker() {
  * DataWorker
  * ====================
  */
-DataWorker::DataWorker(ConvNet& convNet, CPUData& data) : Worker(convNet), _data(&data) {
-    _dp = &convNet.getDataProvider();
+DataWorker::DataWorker(ConvNet& convNet, CPUData& data) : Worker(convNet), _data(&data), _dp(NULL) {
     assert(_data != NULL);
-    _dp->setData(*_data);
+}
+
+bool DataWorker::run() {
+	_dp = &_convNet->getDataProvider();
+	_dp->setData(*_data);
+	_run();
+	_dp->clearData();
+	return false;
 }
 
 DataWorker::~DataWorker() {
-    
 }
 
 /* 
@@ -79,37 +84,22 @@ TrainingWorker::TrainingWorker(ConvNet& convNet, CPUData& data, double progress,
     : DataWorker(convNet, data), _progress(progress), _test(test) {
 }
 
-bool TrainingWorker::run() {
+void TrainingWorker::_run() {
 	_convNet->setTrainingProgress(_progress);
     Cost& batchCost = *new Cost();
-//    Timer t, t2;
-//    t2.start();
     int numMinibatches = _dp->getNumMinibatches();
     for (int i = 0; i < numMinibatches; i++) {
-        Timer miniTimer;
-//        miniTimer.start();
         for (int p = 0; p < _convNet->getNumPasses(); p++) {
-//            t.start();
             _convNet->fprop(i, p, _test ? PASS_TEST : PASS_TRAIN);
-//            printf("Worker: mini=%d, pass=%d fprop took %.2fmsec\n", i, p, t.stop());
-//            t.start();
             _convNet->getCost(batchCost);
-//            printf("Worker: mini=%d, pass=%d getcost took %.2fmsec\n", i, p, t.stop());
 
             if (!_test) {
-//                t.start();
                 _convNet->bprop(p, PASS_TRAIN);
-//                printf("Worker: mini=%d, pass=%d bprop took %.2fmsec\n", i, p, t.stop());
-//                t.start();
                 _convNet->updateWeights(p);
-//                printf("Worker: mini=%d, pass=%d updateWeights took %.2fmsec\n", i, p, t.stop());
             }
         }
-//        printf("Worker: minibatch %d took %.2fmsec\n", i, miniTimer.stop());
     }
-//    printf("Worker: batch took %.2fmsec\n", t2.stop());
     _convNet->getResultQueue().enqueue(new WorkResult(WorkResult::BATCH_DONE, batchCost));
-    return false;
 }
 
 /*
@@ -147,11 +137,9 @@ GradCheckWorker::GradCheckWorker(ConvNet& convNet, CPUData& data)
     : DataWorker(convNet, data) {
 }
 
-bool GradCheckWorker::run() {
+void GradCheckWorker::_run() {
     _convNet->checkGradients();
     exit(0); // eh
-    return true;
-//    exit(0);
 }
 
 /* 
@@ -182,7 +170,7 @@ CPUData& MultiviewTestWorker::getMinibatch(int v, int i) {
     return mini;
 }
 
-bool MultiviewTestWorker::run() {
+void MultiviewTestWorker::_run() {
     int numCasesPerView = _dp->getNumCases() / _numViews;
     int numMiniPerView = DIVUP(numCasesPerView, _dp->getMinibatchSize());
 
@@ -211,7 +199,6 @@ bool MultiviewTestWorker::run() {
 //        }
     }
     _convNet->getResultQueue().enqueue(new WorkResult(WorkResult::BATCH_DONE, batchCost));
-    return false;
 }
 
 /* 
@@ -238,7 +225,7 @@ FeatureWorker::~FeatureWorker() {
     delete _layerNames;
 }
 
-bool FeatureWorker::run() {
+void FeatureWorker::_run() {
     Cost& batchCost = *new Cost();
     map<int,int> repStart; // Feature write start offsets within minibatch
     for (int i = 0; i < _dp->getNumMinibatches(); i++) {
@@ -280,7 +267,6 @@ bool FeatureWorker::run() {
         }
     }
     _convNet->getResultQueue().enqueue(new WorkResult(WorkResult::BATCH_DONE, batchCost));
-    return false;
 }
 
 /* 
@@ -298,7 +284,7 @@ DataGradWorker::~DataGradWorker() {
 //    delete _dataGrads;
 }
 
-bool DataGradWorker::run() {
+void DataGradWorker::_run() {
 //    DataLayer& dataLayer = *dynamic_cast<DataLayer*>(&_convNet->getLayer(_dataLayerIdx));
 //    SoftmaxLayer& softmaxLayer = *dynamic_cast<SoftmaxLayer*>(&_convNet->getLayer(_softmaxLayerIdx));
 //    softmaxLayer.setDoLogregGrad(false);
@@ -331,5 +317,4 @@ bool DataGradWorker::run() {
 //    }
 //    cudaThreadSynchronize();
 //    _convNet->getResultQueue().enqueue(new WorkResult(WorkResult::BATCH_DONE, batchCost));
-    return false;
 }

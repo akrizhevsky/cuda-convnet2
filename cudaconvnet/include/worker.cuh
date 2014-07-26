@@ -54,6 +54,8 @@ protected:
 public:
     DataWorker(ConvNet& convNet, CPUData& data);
     virtual ~DataWorker();
+    bool run();
+    virtual void _run() = 0;
 };
 
 class TrainingWorker : public DataWorker {
@@ -62,7 +64,7 @@ protected:
     double _progress;
 public:
     TrainingWorker(ConvNet& convNet, CPUData& data, double progress, bool test);
-    bool run();
+    void _run();
 };
 
 class SyncWorker : public Worker {
@@ -80,7 +82,7 @@ public:
 class GradCheckWorker : public DataWorker {
 public:
     GradCheckWorker(ConvNet& convNet, CPUData& data);
-    bool run();
+    void _run();
 };
 
 class MultiviewTestWorker : public DataWorker {
@@ -93,7 +95,7 @@ public:
     MultiviewTestWorker(ConvNet& convNet, CPUData& data, int numViews, Matrix& cpuProbs, const char* softmaxName);
     MultiviewTestWorker(ConvNet& convNet, CPUData& data, int numViews);
     ~MultiviewTestWorker();
-    virtual bool run();
+    void _run();
 };
 
 class FeatureWorker : public DataWorker {
@@ -104,7 +106,7 @@ protected:
 public:
     FeatureWorker(ConvNet& convNet, CPUData& data, MatrixV& ftrs, stringv& layerNames, bool deleteFeatures=true);
     ~FeatureWorker();
-    bool run();
+    void _run();
 };
 
 class DataGradWorker : public DataWorker {
@@ -114,10 +116,8 @@ protected:
 public:
     DataGradWorker(ConvNet& convNet, CPUData& data, Matrix& dataGrads, int dataLayerIdx, int softmaxLayerIdx);
     ~DataGradWorker();
-    bool run();
+    void _run();
 };
-
-
 
 #endif	/* WORKER_CUH */
 

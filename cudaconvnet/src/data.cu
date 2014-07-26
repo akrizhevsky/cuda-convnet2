@@ -32,7 +32,7 @@ void DataProvider::clearData() {
 }
 
 void DataProvider::setData(CPUData& hData) {
-    // DataWorker deletes _hData on destruction
+    // DataWorker calls clearData
     _hData = &hData;
     assert(_hData != NULL);
 }
