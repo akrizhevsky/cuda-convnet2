@@ -15,7 +15,7 @@
 ###############################################################################
 
 # Fill in these environment variables.
-# I have tested this code with CUDA 5.5 and 6.0. It runs about 10% faster with
+# I have tested this code with CUDA 5.5 and 6.0. It runs about 20% faster with
 # CUDA 5.5. I don't know why this is. But for this reason I recommend CUDA 5.5.
 # Only use Kepler-generation cards. Older cards won't work.
 
