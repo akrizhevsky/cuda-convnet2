@@ -726,10 +726,10 @@ for (int w = 0; w < filterCacheH; w++) { \
 
 template <int B_Y, int B_X, int imgsPerThread, int colorsPerThread, int filterCacheF, int filterCacheH, bool scale, bool checkCaseBounds, bool conv>
 __global__ void
-//__launch_bounds__(256, 2)   // 256 threads per block, 2 blocks per multiprocessor
-//                            // These launch bounds ensure 25% occupancy (128 registers used)
-//                            // as oppposed to 13% (130 registers) achieved by defaults.
-conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16(cudaTextureObject_t hidActs, cudaTextureObject_t filters, float* targets,
+__launch_bounds__(256, 2)   // 256 threads per block, 2 blocks per multiprocessor
+                            // These launch bounds ensure 25% occupancy (128 registers used)
+                            // as oppposed to 13% (130 registers) achieved by defaults.
+conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex(cudaTextureObject_t hidActs, cudaTextureObject_t filters, float* targets,
                                           const int numModulesY, const int numModulesX, const int numImages, const int numFilters,
                                           const int filterSize, const int imgSizeY, const int imgSizeX, const int paddingStart, const int moduleStride,
                                           const int numImgColors, const int numGroups,
@@ -1281,8 +1281,8 @@ void _imgActs(NVMatrix& hidActs, NVMatrix& filters, NVMatrix& targets,
                     if (numFilterColors % 64 == 0) {
                         // TODO: this code assumes we hvae 32 filters because it uses filter cache of 32!
                         if (numImages % 128 == 0) {
-                            cudaFuncSetCacheConfig(conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16< 8, 32, 4, 8, 32, 16, false, false, true >, cudaFuncCachePreferShared);
-                            conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16< 8, 32, 4, 8, 32, 16, false, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
+                            cudaFuncSetCacheConfig(conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, false, false, true >, cudaFuncCachePreferShared);
+                            conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, false, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                         }
                         else if (numImages % 64 == 0) {
                             cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 2, 8, 32, 16, false, false, true >, cudaFuncCachePreferShared);
@@ -1539,8 +1539,8 @@ void _imgActs(NVMatrix& hidActs, NVMatrix& filters, NVMatrix& targets,
                 if (numFilterColors % 8 == 0) {
                     if (numFilterColors % 64 == 0) {
                         if (numImages % 128 == 0) {
-                            cudaFuncSetCacheConfig(conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16< 8, 32, 4, 8, 32, 16, true, false, true >, cudaFuncCachePreferShared);
-                            conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16< 8, 32, 4, 8, 32, 16, true, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
+                            cudaFuncSetCacheConfig(conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, true, false, true >, cudaFuncCachePreferShared);
+                            conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, true, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                         }
                         else if (numImages % 64 == 0) {
                             cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 2, 8, 32, 16, true, false, true >, cudaFuncCachePreferShared);
@@ -1799,8 +1799,8 @@ void _imgActs(NVMatrix& hidActs, NVMatrix& filters, NVMatrix& targets,
                 if (numFilterColors % 8 == 0) {
                     if (numFilterColors % 64 == 0) {
                         if (numImages % 128 == 0) {
-                            cudaFuncSetCacheConfig(conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16< 8, 32, 4, 8, 32, 16, false, false, false >, cudaFuncCachePreferShared);
-                            conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16< 8, 32, 4, 8, 32, 16, false, false, false ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
+                            cudaFuncSetCacheConfig(conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, false, false, false >, cudaFuncCachePreferShared);
+                            conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, false, false, false ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                         }
                         else if (numImages % 64 == 0) {
                             cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 2, 8, 32, 16, false, false, false >, cudaFuncCachePreferShared);
@@ -2057,8 +2057,8 @@ void _imgActs(NVMatrix& hidActs, NVMatrix& filters, NVMatrix& targets,
                 if (numFilterColors % 8 == 0) {
                     if (numFilterColors % 64 == 0) {
                         if (numImages % 128 == 0) {
-                            cudaFuncSetCacheConfig(conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16< 8, 32, 4, 8, 32, 16, true, false, false >, cudaFuncCachePreferShared);
-                            conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16< 8, 32, 4, 8, 32, 16, true, false, false ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
+                            cudaFuncSetCacheConfig(conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, true, false, false >, cudaFuncCachePreferShared);
+                            conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, true, false, false ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                         }
                         else if (numImages % 64 == 0) {
                             cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 2, 8, 32, 16, true, false, false >, cudaFuncCachePreferShared);

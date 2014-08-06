@@ -1246,11 +1246,10 @@ class PoolLayerParser(LayerWithInputParser):
         dic['stride'] = mcp.safe_get_int(name, 'stride')
         dic['outputsX'] = mcp.safe_get_int(name, 'outputsX', default=0)
         dic['pool'] = mcp.safe_get(name, 'pool')
-        dic['requiresParams'] = dic['pool'] == 'rand'
         
         # Avg pooler does not use its acts or inputs
-        dic['usesActs'] = 'pool' != 'avg'
-        dic['usesInputs'] = 'pool' != 'avg'
+        dic['usesActs'] = dic['pool'] != 'avg'
+        dic['usesInputs'] = dic['pool'] != 'avg'
         
         dic['imgPixels'] = dic['numInputs'][0] / dic['channels']
         dic['imgSize'] = int(n.sqrt(dic['imgPixels']))

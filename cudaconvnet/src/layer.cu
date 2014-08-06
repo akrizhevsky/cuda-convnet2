@@ -1566,7 +1566,9 @@ void* DataCopyThread::run() {
                     if (dataMatrix.isTrans()) {
                         Matrix& replicaDataMatrix = dataMatrix.sliceCols(microStart, microEnd);
                         // In this case, dataMatrix is a view on memory allocated by Python.
-                        _hostMemFwd.copyFromHost(replicaDataMatrix, true);
+                        //_hostMemFwd.copyFromHost(replicaDataMatrix, true);
+                        _hostMemFwd.resize(replicaDataMatrix.getNumRows(), replicaDataMatrix.getNumCols(), true);
+                        memcpy(_hostMemFwd.getDevData(), replicaDataMatrix.getData(), replicaDataMatrix.getNumDataBytes());
                         delete &replicaDataMatrix; // view
                         NVMatrix& hostMemFwdSlice = _hostMemFwd.sliceRows(_parent->getStart(), _parent->getEnd());
                         for (intv::iterator it = _parent->getNextDeviceIDs().begin(); it != _parent->getNextDeviceIDs().end(); ++it) {
