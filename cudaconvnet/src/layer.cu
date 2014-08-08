@@ -2291,9 +2291,9 @@ SumOfSquaresCostLayer::SumOfSquaresCostLayer(ConvNetThread* convNetThread, PyObj
 }
 
 void SumOfSquaresCostLayer::fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx) {
-    _inputs[0]->apply(NVMatrixOps::Square(), getActs());
+    _inputs[0]->apply(NVMatrixOps::Square(), _tmp);
     _costv.clear();
-    _costv.push_back(getActs().sum());
+    _costv.push_back(_tmp.sum());
 }
 
 void SumOfSquaresCostLayer::bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTargets, PASS_TYPE passType) {

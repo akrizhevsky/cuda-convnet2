@@ -799,6 +799,7 @@ public:
 
 class SumOfSquaresCostLayer : public CostLayer {
 protected:
+    NVMatrix _tmp;
     void fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx);
     void bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTargets, PASS_TYPE passType);
 public:
