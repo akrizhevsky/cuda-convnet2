@@ -28,6 +28,9 @@ protected:
         assert(_data->size() > 0);
         for (int i = 1; i < _data->size(); i++) {
             assert(_data->at(i-1)->getNumCols() == _data->at(i)->getNumCols());
+            if (_data->at(i-1)->isTrans() != _data->at(i)->isTrans() && _data->at(i)->getNumElements() < 2) {
+                _data->at(i)->setTrans(_data->at(i-1)->isTrans());
+            }
             assert(_data->at(i-1)->isTrans() == _data->at(i)->isTrans());
         }
         assert(_data->at(0)->getNumCols() > 0);
