@@ -65,11 +65,11 @@ DataWorker::DataWorker(ConvNet& convNet, CPUData& data) : Worker(convNet), _data
 }
 
 bool DataWorker::run() {
-	_dp = &_convNet->getDataProvider();
-	_dp->setData(*_data);
-	_run();
-	_dp->clearData();
-	return false;
+    _dp = &_convNet->getDataProvider();
+    _dp->setData(*_data);
+    _run();
+    _dp->clearData();
+    return false;
 }
 
 DataWorker::~DataWorker() {
@@ -85,7 +85,7 @@ TrainingWorker::TrainingWorker(ConvNet& convNet, CPUData& data, double progress,
 }
 
 void TrainingWorker::_run() {
-	_convNet->setTrainingProgress(_progress);
+    _convNet->setTrainingProgress(_progress);
     Cost& batchCost = *new Cost();
     int numMinibatches = _dp->getNumMinibatches();
     for (int i = 0; i < numMinibatches; i++) {

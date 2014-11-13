@@ -15,7 +15,7 @@
  */
 
 #ifndef WORKER_CUH
-#define	WORKER_CUH
+#define WORKER_CUH
 
 #include "convnet.cuh"
 #include "cost.cuh"
@@ -119,5 +119,5 @@ public:
     void _run();
 };
 
-#endif	/* WORKER_CUH */
+#endif/* WORKER_CUH */
 
