@@ -1504,7 +1504,7 @@ layer_parsers = {'data' :           lambda : DataLayerParser(),
                  'dropout':         lambda : DropoutLayerParser(),
                  'dropout2':        lambda : Dropout2LayerParser(),
                  'cost.logreg':     lambda : LogregCostParser(),
-                 'cost.ce':         lambda : CrossEntCostParser(),
+                 'cost.crossent':   lambda : CrossEntCostParser(),
                  'cost.bce':        lambda : BinomialCrossEntCostParser(),
                  'cost.dce':        lambda : DetectionCrossEntCostParser(),
                  'cost.sum2':       lambda : SumOfSquaresCostParser()}
