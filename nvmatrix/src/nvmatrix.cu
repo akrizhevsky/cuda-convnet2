@@ -1036,7 +1036,7 @@ void NVMatrix::_aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, Bina
             getLastCudaError("kAggCols: Kernel execution failed");
 
             int numBlocks = DIVUP(width, NUM_SUM_COLS_THREADS_PER_BLOCK);
-            kDumbAggCols<Agg, NVMatrixOps::Identity, BinaryOp><<<numBlocks,NUM_SUM_COLS_THREADS_PER_BLOCK, 0, stream>>>(tmp.getTextureObject(), target.getDevData(), width, height, agg, NVMatrixOps::Identity(), bop);
+            kDumbAggCols<Agg, NVMatrixOps::Identity, BinaryOp><<<numBlocks,NUM_SUM_COLS_THREADS_PER_BLOCK, 0, stream>>>(tmp.getTextureObject(), target.getDevData(), width, numBlocksY, agg, NVMatrixOps::Identity(), bop);
             getLastCudaError("kDumbAggCols: Kernel execution failed");
         }
     } else { // row sum
