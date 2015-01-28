@@ -81,7 +81,7 @@ public:
             return (a > 0) - (a < 0);
         }
     };
-    
+
     class Identity {
     public:
         __device__ inline float operator()(const float a) const {
@@ -102,7 +102,7 @@ public:
             return 1;
         }
     };
-    
+
     class Const {
     private:
         const float scalar;
@@ -273,6 +273,27 @@ public:
         }
     };
 
+    class DivideAccurate : public BinaryOp {
+    public:
+        __device__ inline float operator()(const float a, const float b) const  {
+            return a / b;
+        }
+    };
+
+    class DivideSafe : public BinaryOp {
+    public:
+        __device__ inline float operator()(const float a, const float b) const  {
+            return b == 0 ? 0 : __fdividef(a, b);
+        }
+    };
+
+    class DivideSafeAccurate : public BinaryOp {
+    public:
+        __device__ inline float operator()(const float a, const float b) const  {
+            return b == 0 ? 0 : (a / b);
+        }
+    };
+
     class Multiply : public BinaryOp {
     public:
         __device__ inline float operator()(const float a, const float b) const {
@@ -328,21 +349,21 @@ public:
             return a + b;
         }
     };
-    
+
     class First : public BinaryOp {
     public:
         __device__ inline float operator()(const float a, const float b) const {
             return a;
         }
     };
-    
+
     class Second : public BinaryOp {
     public:
         __device__ inline float operator()(const float a, const float b) const {
             return b;
         }
     };
-    
+
     class SecondScaled : public BinaryOp {
     private:
         const float scale;

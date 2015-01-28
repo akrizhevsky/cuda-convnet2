@@ -520,6 +520,7 @@ public:
 
 class AvgPoolLayer : public PoolLayer {
 protected:
+    bool _sum;
     void fpropActs(int inpIdx, float scaleTargets, PASS_TYPE passType, int passIdx);
     void bpropActs(NVMatrix& v, int replicaIdx, int inpIdx, float scaleTargets, PASS_TYPE passType);
 public:

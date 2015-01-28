@@ -178,10 +178,10 @@ void NVMatrix::copyToHost(Matrix& hostMatrix, bool resizeTarget, cudaStream_t st
         assert(isSameDims(hostMatrix));
     }
     hostMatrix.setTrans(_isTrans);
+
     if (getNumElements() > 0) {
-//        printf("gpu.stride: %d, host.stride: %d\n", getStride(), hostMatrix.getLeadingDim());
         CUBLAS_CALL(cublasGetMatrixAsync(getLeadingDim(),getFollowingDim(), sizeof(float),
-                                     getDevData(), getStride(), hostMatrix.getData(), hostMatrix.getLeadingDim(), stream));
+                                         getDevData(), getStride(), hostMatrix.getData(), hostMatrix.getLeadingDim(), stream));
         syncStream(stream);
     }
 }
@@ -674,7 +674,7 @@ NVMatrix& NVMatrix::slice(int startRow, int endRow, int startCol, int endCol) co
 
     if (!isTrans()) {
         return construct(new MemorySegment(this->getDevData() + startRow * _stride + startCol), endRow - startRow, endCol - startCol, _stride, false);
-    } 
+    }
     return construct(new MemorySegment(this->getDevData() + startCol * _stride + startRow), endRow - startRow, endCol - startCol, _stride, true);
 }
 
@@ -1001,12 +1001,17 @@ void NVMatrix::eltwiseDivideByVector(NVMatrix& vec, NVMatrix& target) {
     applyBinaryV(NVMatrixBinaryOps::Divide(), vec, target);
 }
 
+template<class Agg, class UnaryOp, class BinaryOp>
+void NVMatrix::_aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, BinaryOp bop, cudaStream_t stream) {
+    _aggregate(axis, target, agg, uop, bop, stream, NULL);
+}
+
 /*
  * TODO: this is a mess, fix it. it works pretty fast but it's too ugly.
  * TODO: this function is _really_ bad for very long aggregations of few columns.
  */
 template<class Agg, class UnaryOp, class BinaryOp>
-void NVMatrix::_aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, BinaryOp bop, cudaStream_t stream) {
+void NVMatrix::_aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, BinaryOp bop, cudaStream_t stream, NVMatrix* tmp) {
     assert(axis == 0 || axis == 1);
     assert(isContiguous()  && target.isContiguous());
     assert(&target != this);
@@ -1027,17 +1032,26 @@ void NVMatrix::_aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, Bina
             getLastCudaError("kDumbAggCols: Kernel execution failed");
         } else { // Specialize the case when we have very long columns and few of them
             const int sumLength = 128;
-            NVMatrix tmp(DIVUP(height, sumLength), width);
+            bool deltmp = tmp == NULL;
+            if (tmp == NULL) {
+                tmp = new NVMatrix(false);
+            }
+
             int numBlocksX = DIVUP(width, NUM_SUM_COLS_THREADS_PER_BLOCK);
             int numBlocksY = DIVUP(height, sumLength);
+            tmp->resize(numBlocksY, width);
+
             dim3 blocks(numBlocksX, numBlocksY);
             dim3 threads(NUM_SUM_COLS_THREADS_PER_BLOCK);
-            kAggCols<Agg, UnaryOp><<<blocks,threads, 0, stream>>>(getTextureObject(), tmp.getDevData(), width, height, sumLength, agg, uop);
+            kAggCols<Agg, UnaryOp><<<blocks,threads, 0, stream>>>(getTextureObject(), tmp->getDevData(), width, height, sumLength, agg, uop);
             getLastCudaError("kAggCols: Kernel execution failed");
 
             int numBlocks = DIVUP(width, NUM_SUM_COLS_THREADS_PER_BLOCK);
-            kDumbAggCols<Agg, NVMatrixOps::Identity, BinaryOp><<<numBlocks,NUM_SUM_COLS_THREADS_PER_BLOCK, 0, stream>>>(tmp.getTextureObject(), target.getDevData(), width, numBlocksY, agg, NVMatrixOps::Identity(), bop);
+            kDumbAggCols<Agg, NVMatrixOps::Identity, BinaryOp><<<numBlocks,NUM_SUM_COLS_THREADS_PER_BLOCK, 0, stream>>>(tmp->getTextureObject(), target.getDevData(), width, numBlocksY, agg, NVMatrixOps::Identity(), bop);
             getLastCudaError("kDumbAggCols: Kernel execution failed");
+            if (deltmp) {
+                delete tmp;
+            }
         }
     } else { // row sum
         target.resize(_isTrans ? 1 : _numRows, _isTrans ? _numCols : 1);
@@ -1154,6 +1168,47 @@ NVMatrix& NVMatrix::_aggregate(int axis, Agg agg, BinaryOp bop, cudaStream_t str
     return _aggregate(axis, agg, NVMatrixOps::Identity(), bop, stream);
 }
 
+
+
+template<class Agg, class UnaryOp, class BinaryOp>
+void NVMatrix::_aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, BinaryOp bop, NVMatrix& tmp) {
+    _aggregate(axis, target, agg, uop, bop, getDefaultStream(), tmp);
+}
+
+template<class Agg, class BinaryOp>
+void NVMatrix::_aggregate(int axis, NVMatrix& target, Agg agg, BinaryOp bop, NVMatrix& tmp) {
+    _aggregate(axis, target, agg, NVMatrixOps::Identity(), bop, getDefaultStream(), &tmp);
+}
+
+template<class Agg, class BinaryOp>
+void NVMatrix::_aggregate(int axis, NVMatrix& target, Agg agg, BinaryOp bop, cudaStream_t stream, NVMatrix& tmp) {
+    _aggregate(axis, target, agg, NVMatrixOps::Identity(), bop, stream, &tmp);
+}
+
+template<class Agg, class UnaryOp, class BinaryOp>
+NVMatrix& NVMatrix::_aggregate(int axis, Agg agg, UnaryOp uop, BinaryOp bop, NVMatrix& tmp) {
+    NVMatrix &sumVec = construct();
+    _aggregate(axis, sumVec, agg, uop, bop, tmp);
+    return sumVec;
+}
+
+template<class Agg, class UnaryOp, class BinaryOp>
+NVMatrix& NVMatrix::_aggregate(int axis, Agg agg, UnaryOp uop, BinaryOp bop, cudaStream_t stream, NVMatrix& tmp) {
+    NVMatrix &sumVec = construct();
+    _aggregate(axis, sumVec, agg, uop, bop, stream, tmp);
+    return sumVec;
+}
+
+template<class Agg, class BinaryOp>
+NVMatrix& NVMatrix::_aggregate(int axis, Agg agg, BinaryOp bop, NVMatrix& tmp) {
+    return _aggregate(axis, agg, NVMatrixOps::Identity(), bop, tmp);
+}
+
+template<class Agg, class BinaryOp>
+NVMatrix& NVMatrix::_aggregate(int axis, Agg agg, BinaryOp bop, cudaStream_t stream, NVMatrix& tmp) {
+    return _aggregate(axis, agg, NVMatrixOps::Identity(), bop, stream, tmp);
+}
+
 void NVMatrix::inRangeInc(float lower, float upper) {
     inRangeInc(lower, upper, *this);
 }
@@ -1252,11 +1307,12 @@ void NVMatrix::zero(NVMatrix& like) {
     zero();
 }
 
-
-
-
 void NVMatrix::max(int axis, NVMatrix& target) {
     _aggregate(axis, target, NVMatrixAggs::Max(), NVMatrixBinaryOps::Second());
+}
+
+void NVMatrix::max(int axis, NVMatrix& target, NVMatrix& tmp) {
+    _aggregate(axis, target, NVMatrixAggs::Max(), NVMatrixBinaryOps::Second(), tmp);
 }
 
 void NVMatrix::addSum(NVMatrix& a, int axis, float scaleThis, float scaleSum) {
@@ -1270,12 +1326,33 @@ void NVMatrix::addSum(NVMatrix& a, int axis, float scaleThis, float scaleSum, cu
         a._aggregate(axis, *this, NVMatrixAggs::Sum(), NVMatrixBinaryOps::SecondScaled(scaleSum), stream);
     }
 }
+
+void NVMatrix::addMax(NVMatrix& a, int axis, float scaleThis, float scaleMax) {
+    addMax(a, axis, scaleThis, scaleMax, getDefaultStream());
+}
+
+void NVMatrix::addMax(NVMatrix& a, int axis, float scaleThis, float scaleMax, cudaStream_t stream) {
+    if (scaleThis != 0) {
+        a._aggregate(axis, *this, NVMatrixAggs::Max(), NVMatrixBinaryOps::WeightedAdd(scaleThis, scaleMax), stream);
+    } else {
+        a._aggregate(axis, *this, NVMatrixAggs::Max(), NVMatrixBinaryOps::SecondScaled(scaleMax), stream);
+    }
+}
+
 void NVMatrix::sum(int axis, NVMatrix& target) {
     sum(axis, target, getDefaultStream());
 }
 
 void NVMatrix::sum(int axis, NVMatrix& target, cudaStream_t stream) {
     _aggregate(axis, target, NVMatrixAggs::Sum(), NVMatrixBinaryOps::Second(), stream);
+}
+
+void NVMatrix::sum(int axis, NVMatrix& target, NVMatrix& tmp) {
+    sum(axis, target, getDefaultStream(), tmp);
+}
+
+void NVMatrix::sum(int axis, NVMatrix& target, cudaStream_t stream, NVMatrix& tmp) {
+    _aggregate(axis, target, NVMatrixAggs::Sum(), NVMatrixBinaryOps::Second(), stream, tmp);
 }
 
 void NVMatrix::sumOfSquares(int axis, NVMatrix& target) {
@@ -1499,6 +1576,12 @@ NVMatrix& NVMatrix::construct(MemorySegment* mem, int numRows, int numCols, int 
     return *new NVMatrix(mem, numRows, numCols, stride, isTrans);
 }
 
+std::pair<size_t, size_t> NVMatrix::getCudaMemorySize() {
+    size_t memFree, memTotal;
+    checkCudaErrors(cudaMemGetInfo(&memFree, &memTotal));
+    return std::pair<size_t,size_t>(memFree, memTotal);
+}
+
 
 /* ================
  * HostNVMatrix
@@ -1622,7 +1705,7 @@ void HostNVMatrix::copyToHost(Matrix& hostMatrix) const {
     copyToHost(hostMatrix, false, 0);
 }
 
-void HostNVMatrix::alloc(int numElements) { 
+void HostNVMatrix::alloc(int numElements) {
 //    checkCudaErrors(cudaHostAlloc(&_devData, numElements * sizeof(float), cudaHostAllocPortable));
     _memSegment = HOST_MEMORY_MANAGER::getInstance().malloc(numElements * sizeof(float));
 //    _memSegment = FastHostMemoryManager::getInstance().malloc(numElements * sizeof(float));

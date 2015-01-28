@@ -100,7 +100,7 @@ __global__ void conv_weight_acts_c_kepler(float* images, float* hidActs, float* 
     const int moduleIdx = partialSum * outputModuleIdx;
     const int blockFilterIdx = B_X * filtersPerThread* (blockIdx.x % filterBlocksPerModule);
 
-//    const int moduleStride = (imgSize - filterSize + 1) / numModulesX; 
+//    const int moduleStride = (imgSize - filterSize + 1) / numModulesX;
     const int numModules = numModulesY * numModulesX;
 
     const int blockPixelOffset = blockIdx.y * B_Y * pixelsPerThread;
@@ -109,7 +109,7 @@ __global__ void conv_weight_acts_c_kepler(float* images, float* hidActs, float* 
     hidActs += blockFilterIdx * numImages * numModules
             + loadY * numImages * numModules
             + loadX;
-    
+
     targets += (outputModuleIdx * numFilters) * filterPixels * numColors
             + blockPixelOffset * numFilters
             + blockFilterIdx
@@ -126,7 +126,7 @@ __global__ void conv_weight_acts_c_kepler(float* images, float* hidActs, float* 
             }
         }
     }
-    
+
     __shared__ int pxIdxes[B_Y*pixelsPerThread];
     //__shared__ bool isPxInImage[B_Y*pixelsPerThread];
     for (int m = moduleIdx; m < moduleIdx + partialSum; m++) {
@@ -170,7 +170,7 @@ __global__ void conv_weight_acts_c_kepler(float* images, float* hidActs, float* 
 
                         if (pxIdx + blockPixelOffset < filterPixels && (!checkCaseBounds || caseIdx + loadX < numImages)) {
                             const int pixIdx = pxIdxes[pxIdx];//(pxY * imgSizeX + pxX) * imgStride;
-                            
+
                             if (pixIdx >= 0) {
                                 #pragma unroll
                                 for (int c = 0; c < numColors; c++) {
@@ -213,7 +213,7 @@ __global__ void conv_weight_acts_c_kepler(float* images, float* hidActs, float* 
             }
         }
     }
-    
+
     if (scale) {
         #pragma unroll
         for (int p = 0; p < pixelsPerThread; p++) {
@@ -253,12 +253,12 @@ __global__ void conv_weight_acts_c_kepler(float* images, float* hidActs, float* 
  * blockIdx.z determines pixel in filter
  *            NOTE: blockIdx.z is limited to values < 2^16. This means that this routine will
  *                  fail for filters >= 256*256. I'm assuming I won't ever use such large filters.
- 
+
  * images:      (numImgColors, imgSizeY, imgSizeX, numImages), with stride given
  * hidActs:     (numFilters, numModulesY, numModulesX, numImages)
  *
  * targets:     (numModulesY*numModulesX/partialSum, numFilterColors, filterPixels, numFilters)
- 
+
  * B_X * B_Y must be divisible by preloadCases
  */
 template <int B_Y, int B_X, int filtersPerThread, int colorsPerThread, int preloadCases, bool scale>
@@ -283,11 +283,11 @@ __global__ void conv_weight_acts_mc_mf_kepler(float* images, float* hidActs, flo
     const int moduleIdx = partialSum * outputModuleIdx;
     const int blockFilterIdx = filtersPerThread * B_X * (blockIdx.x % numFilterBlocks);
     const int numModules = numModulesY * numModulesX;
-    
+
     const int numFiltersPerGroup = numFilters / numGroups;
     const int blockGroupIdx = blockFilterIdx / numFiltersPerGroup;
     const int numFilterColors = numImgColors / numGroups;
-    
+
     const int blockPixelOffset = blockIdx.z; // pixel idx in filter
     const int blockPixelY = blockPixelOffset / filterSize, blockPixelX = blockPixelOffset % filterSize;
     const int blockFilterColorIdx = blockIdx.y  * B_Y * colorsPerThread;
@@ -295,11 +295,11 @@ __global__ void conv_weight_acts_mc_mf_kepler(float* images, float* hidActs, flo
 
     images += (imgColorIdx + loadY) * imgPixels * imgStride + loadX;
 
-    hidActs += 
+    hidActs +=
              blockFilterIdx * numImages * numModules
             + loadY * numImages * numModules
             + loadX;
-    
+
     targets += outputModuleIdx * numFilters * filterPixels * numFilterColors
             + (blockFilterColorIdx + threadIdx.y) * filterPixels * numFilters
             + blockPixelOffset * numFilters
@@ -335,7 +335,7 @@ __global__ void conv_weight_acts_mc_mf_kepler(float* images, float* hidActs, flo
                      * This will load some images from filter pixels that don't exist (it'll set those to 0),
                      * but the code does not produce any output for those pixels (see last lines).
                      */
-                    if (loadY < B_Y * colorsPerThread) { 
+                    if (loadY < B_Y * colorsPerThread) {
                         #pragma unroll
                         for (int y = 0; y < B_Y * colorsPerThread; y += (B_X * B_Y) / preloadCases) {
                             // Make sure number of rows in the array is divisible by number of rows filled per iteration
@@ -372,7 +372,7 @@ __global__ void conv_weight_acts_mc_mf_kepler(float* images, float* hidActs, flo
                 }
 
                 __syncthreads();
-                #pragma unroll 
+                #pragma unroll
                 for (int i = 0; i < preloadCases; i++) {
                     #pragma unroll
                     for (int f = 0; f < filtersPerThread; f++) {
@@ -1480,6 +1480,7 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_16_f_4_c_8_r_16(cu
         haPreload[y * preloadCases / (B_X * B_Y)] = tex1Dfetch<float>(hidActs, hidActsOffset + idx);
     }
 
+
     for (int my = mStartY; my < mEndY; my++) {
         for (int mx = mStartX; mx < mEndX; mx++) {
             int myNext = my, mxNext = mx;
@@ -1618,12 +1619,16 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_6_r_32(cu
             + blockPixelOffset * numFilters
             + blockFilterIdx
             + threadIdx.x;
+//    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0) return;
 
     const int mStartX = max(blockModuleStartX, DIVUP(-blockPixelX - paddingStart, moduleStride));
     const int mStartY = max(blockModuleStartY, DIVUP(-blockPixelY - paddingStart, moduleStride));
     const int mEndX = min(numModulesX, min(blockModuleStartX + sumWidth, DIVUP(imgSizeX - blockPixelX - paddingStart, moduleStride)));
     const int mEndY = min(numModulesY, min(blockModuleStartY + sumWidth, DIVUP(imgSizeY - blockPixelY - paddingStart, moduleStride)));
 
+//    if (mStartY == mEndY || mStartX == mEndX) {
+//        return;
+//    }
     const bool doWork = mStartY < mEndY && mStartX < mEndX;
 
     float* shHidActLoad = &shHidActs[loadY][loadX];
@@ -1659,6 +1664,9 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_6_r_32(cu
             haPreload[y * preloadCases / (B_X * B_Y)] = tex1Dfetch<float>(hidActs, hidActsOffset + y * numImages * numModules + m * numImages);
         }
     }
+//    if (mStartY > mEndY || mStartX > mEndX) {
+//        printf("crzy!!\n");
+//    }
 
     for (int my = mStartY; my < mEndY; my++) {
         for (int mx = mStartX; mx < mEndX; mx++) {
@@ -1991,20 +1999,27 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_8_r_16(cu
     }
 }
 
+std::pair<int,int> getWeightActsOutputSize(int numModulesY, int numModulesX, int numFilterColors,
+                                                  int filterSize, int numFilters, int sumWidth) {
+    const int outputModuleChunksX = DIVUP(numModulesX, sumWidth);
+    const int outputModuleChunksY = DIVUP(numModulesY, sumWidth);
+    const int outputModuleChunks = outputModuleChunksX * outputModuleChunksY;
+    return std::pair<int,int>(outputModuleChunks * numFilterColors * filterSize * filterSize, numFilters);
+}
 
 /*
  * images:      (numImgColors, imgSizeY, imgSizeX, numImages), with stride given
  * hidActs:     (numFilters, numModules, numImages)
  *
  * targets:     (numModuleY*numModulesX/partialSum, numFilterColors, filterPixels, numFilters)
- * 
+ *
  * TODO: you can get a slight speed boost for local non-convolutional units by writing special
  * routines for partialSum = 1. But I dunno if the code duplication is worth it...
- * 
+ *
  * Note: all of these convolution routines are optimized for the case when
- * the number of images (i.e. the minibatch size) is a multiple of 128. 
+ * the number of images (i.e. the minibatch size) is a multiple of 128.
  * Other batch sizes will work, but but I made no attempt whatsoever
- * to make them work fast. 
+ * to make them work fast.
  */
 void _weightActs(NVMatrix& images, NVMatrix& hidActs, NVMatrix& targets,
         int imgSizeY, int numModulesY, int numModulesX, int filterSize, int paddingStart, int moduleStride, int numImgColors,
@@ -2017,7 +2032,7 @@ void _weightActs(NVMatrix& images, NVMatrix& hidActs, NVMatrix& targets,
     int numModules = numModulesY * numModulesX;
     int numFilters = hidActs.getNumRows() / numModules;
     int numFiltersPerGroup = numFilters / numGroups;
-    
+
     assert(numImgColors % numGroups == 0);
     assert(numFilters % (16*numGroups) == 0);
     assert(numGroups > 1 || (numImgColors > 0 && (numImgColors <= 3 || numImgColors % 16 == 0)));
@@ -2039,7 +2054,7 @@ void _weightActs(NVMatrix& images, NVMatrix& hidActs, NVMatrix& targets,
     assert(paddingStart + (numModulesX-1)*moduleStride + filterSize >= imgSizeX);
     assert(paddingStart + (numModulesY-1)*moduleStride + filterSize >= imgSizeY);
     assert(moduleStride <= filterSize);
-    
+
     assert(numModules * numFilters == hidActs.getNumRows());
 
     assert(!images.isTrans());
@@ -2048,7 +2063,7 @@ void _weightActs(NVMatrix& images, NVMatrix& hidActs, NVMatrix& targets,
 
     assert(!targets.isTrans());
     assert(targets.isContiguous());
-    
+
     int preloadCases = 32;
 
     dim3 blocks, threads;
@@ -2082,19 +2097,19 @@ void _weightActs(NVMatrix& images, NVMatrix& hidActs, NVMatrix& targets,
             filtersPerThread = 3;
             pixelsPerThread = 4;
             by = 16;
-            bx = 16; 
+            bx = 16;
             preloadCases = 32;
         } else if (numFilters % 32 == 0) {
             filtersPerThread = 2;
             pixelsPerThread = 2;
             by = 8;
-            bx = 16; 
+            bx = 16;
             preloadCases = 16;
         } else { // This case is completely untested. It might be really slow. But no time now.
             filtersPerThread = 1;
             pixelsPerThread = 16;
             by = 16;
-            bx = 16; 
+            bx = 16;
             preloadCases = 32;
         }
         blocks = dim3(outputModuleChunks*(numFilters/(bx*filtersPerThread)), DIVUP(filterPixels, by*pixelsPerThread));
@@ -2104,11 +2119,12 @@ void _weightActs(NVMatrix& images, NVMatrix& hidActs, NVMatrix& targets,
     threads = dim3(bx, by);
     bool checkCaseBounds = numImages % preloadCases != 0;
     bool scale = scaleTargets != 0;
-    if (!scale) { 
-        targets.resize(outputModuleChunks * numFilterColors*filterPixels, numFilters);
+    std::pair<int,int> targetSize = getWeightActsOutputSize(numModulesY, numModulesX, numFilterColors, filterSize, numFilters, sumWidth);
+    if (!scale) {
+        targets.resize(targetSize.first, targetSize.second);
     } else {
-        assert(targets.getNumRows() == outputModuleChunks * numFilterColors*filterPixels);
-        assert(targets.getNumCols() == numFilters);
+        assert(targets.getNumRows() == targetSize.first);
+        assert(targets.getNumCols() == targetSize.second);
     }
     cudaStream_t stream = NVMatrix::getDefaultStream();
 
@@ -2178,6 +2194,7 @@ void _weightActs(NVMatrix& images, NVMatrix& hidActs, NVMatrix& targets,
                         conv_weight_acts_mc_mf_kepler_sw < 4, 16, 4, 4, 32, false ><<<blocks, threads, 0, stream>>>(images.getDevData(), hidActs.getDevData(), targets.getDevData(), numImages, numFilters, numModulesY, numModulesX, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, imgStride, numImgColors, numGroups, sumWidth, scaleTargets, scaleOutput);
                     }
                     else if (numFiltersPerGroup % 32 == 0) {
+
                         cudaFuncSetCacheConfig(conv_weight_acts_mc_mf_kepler_sw < 4, 16, 2, 4, 32, false >, cudaFuncCachePreferShared);
                         conv_weight_acts_mc_mf_kepler_sw < 4, 16, 2, 4, 32, false ><<<blocks, threads, 0, stream>>>(images.getDevData(), hidActs.getDevData(), targets.getDevData(), numImages, numFilters, numModulesY, numModulesX, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, imgStride, numImgColors, numGroups, sumWidth, scaleTargets, scaleOutput);
                     }

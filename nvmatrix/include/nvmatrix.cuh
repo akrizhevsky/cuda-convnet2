@@ -99,13 +99,14 @@ protected:
          */
         return _isTrans ? CUBLAS_OP_N : CUBLAS_OP_T;
     }
-    
+
     void _init(bool isTrans);
     void _sum_setParams(int n, dim3* blocks, dim3* threads);
     template<class Agg> float cpuAgg(Agg agg, cudaStream_t stream);
     template<class Agg> float _totalAgg(Agg agg);
     template<class Agg> float _totalAgg(Agg agg, cudaStream_t stream);
     template<class Agg> float _totalAgg(Agg agg, NVMatrix& tmpbuf, cudaStream_t stream);
+    template<class Agg, class UnaryOp, class BinaryOp> void _aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, BinaryOp bop, cudaStream_t stream, NVMatrix* tmp);
     template<class Agg, class UnaryOp, class BinaryOp> void _aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, BinaryOp bop, cudaStream_t stream);
     template<class Agg, class UnaryOp, class BinaryOp> void _aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, BinaryOp bop);
     template<class Agg, class BinaryOp> void _aggregate(int axis, NVMatrix& target, Agg agg, BinaryOp bop, cudaStream_t stream);
@@ -114,6 +115,15 @@ protected:
     template<class Agg, class BinaryOp> NVMatrix& _aggregate(int axis, Agg agg, BinaryOp bop);
     template<class Agg, class UnaryOp, class BinaryOp> NVMatrix& _aggregate(int axis, Agg agg, UnaryOp, BinaryOp bop, cudaStream_t stream);
     template<class Agg, class UnaryOp, class BinaryOp> NVMatrix& _aggregate(int axis, Agg agg, UnaryOp, BinaryOp bop);
+
+    template<class Agg, class UnaryOp, class BinaryOp> void _aggregate(int axis, NVMatrix& target, Agg agg, UnaryOp uop, BinaryOp bop, NVMatrix& tmp);
+    template<class Agg, class BinaryOp> void _aggregate(int axis, NVMatrix& target, Agg agg, BinaryOp bop, cudaStream_t stream, NVMatrix& tmp);
+    template<class Agg, class BinaryOp> void _aggregate(int axis, NVMatrix& target, Agg agg, BinaryOp bop, NVMatrix& tmp);
+    template<class Agg, class BinaryOp> NVMatrix& _aggregate(int axis, Agg agg, BinaryOp bop, cudaStream_t stream, NVMatrix& tmp);
+    template<class Agg, class BinaryOp> NVMatrix& _aggregate(int axis, Agg agg, BinaryOp bop, NVMatrix& tmp);
+    template<class Agg, class UnaryOp, class BinaryOp> NVMatrix& _aggregate(int axis, Agg agg, UnaryOp, BinaryOp bop, cudaStream_t stream, NVMatrix& tmp);
+    template<class Agg, class UnaryOp, class BinaryOp> NVMatrix& _aggregate(int axis, Agg agg, UnaryOp, BinaryOp bop, NVMatrix& tmp);
+
     template <class Randomizer> void _unaryRandomize(NVMatrix& target, Randomizer rnd, cudaStream_t stream);
     template <class Randomizer> void _unaryRandomize(NVMatrix& target, Randomizer rnd);
     template <class Randomizer> void _binaryRandomize(NVMatrix& data2, NVMatrix& target, Randomizer rnd);
@@ -151,6 +161,7 @@ public:
     static void initRandom();
     static void initCublas();
     static void destroyCublas();
+    static std::pair<size_t, size_t> getCudaMemorySize();
 
     // Returns the currently-active device ID for calling thread
     static int getDeviceID();
@@ -221,7 +232,7 @@ public:
     float* getDevData() const {
         return _memSegment == NULL ? NULL : _memSegment->getData<float>();
     }
-    
+
     MemorySegment& getMemorySegment() const {
         return *_memSegment;
     }
@@ -229,7 +240,7 @@ public:
     int getNumElements() const {
         return _numElements;
     }
-    
+
     size_t getNumDataBytes() const {
         return size_t(_numElements) * 4;
     }
@@ -245,7 +256,7 @@ public:
             _stride = getLeadingDim();
         }
     }
-    
+
     /*
      * Only use if you know what you're doing!
      * This toggles whether this object will free its GPU memory when it's destroyed.
@@ -257,13 +268,13 @@ public:
     bool isContiguous() const {
         return _stride == getLeadingDim() || getFollowingDim() == 1;
     }
-    
+
     void truncate() {
         resize(0,0);
     }
 
     virtual cudaTextureObject_t getTextureObject();
-   
+
     virtual void copyFromHost(const Matrix& hostMatrix);
     virtual void copyFromHost(const Matrix& hostMatrix, bool resizeTarget);
     virtual void copyFromHost(const Matrix& hostMatrix, bool resizeTarget, cudaStream_t stream);
@@ -351,7 +362,7 @@ public:
             }
         }
     }
-    
+
     template <class Op> void apply(Op op, cudaStream_t stream) {
         apply(op, *this, stream);
     }
@@ -363,7 +374,7 @@ public:
     template <class Op> void apply(Op op) {
         apply(op, *this);
     }
-    
+
     template <class Op> void applyBinary(Op op, NVMatrix& b) {
         applyBinary(op, b, *this);
     }
@@ -430,7 +441,7 @@ public:
             }
         }
     }
-    
+
     template <class Op> void applyTernary(Op op, NVMatrix& b, NVMatrix& c, NVMatrix& target) {
         applyTernary(op, b, c, target, getDefaultStream());
     }
@@ -447,8 +458,8 @@ public:
         if (getNumElements() > 0) {
             int height = target.getFollowingDim(), width = target.getLeadingDim();
             if (!isContiguous() || !b.isContiguous() || !c.isContiguous() || !target.isContiguous()) {
-                dim3 blocks(std::min(128, DIVUP(width, ELTWISE_THREADS_X)),
-                            std::min(128, DIVUP(height, ELTWISE_THREADS_Y)));
+                dim3 blocks(std::min(512, DIVUP(width, ELTWISE_THREADS_X)),
+                            std::min(512, DIVUP(height, ELTWISE_THREADS_Y)));
                 dim3 threads(ELTWISE_THREADS_X, ELTWISE_THREADS_Y);
                 kEltwiseTernaryOp<Op><<<blocks, threads, 0, stream>>>(getDevData(), b.getDevData(), c.getDevData(), target.getDevData(), height, width,
                                                                        getStride(), b.getStride(), c.getStride(), target.getStride(), op);
@@ -461,7 +472,6 @@ public:
             }
         }
     }
-
 
     bool resize(int numRows, int numCols, bool trans);
     bool resize(int numRows, int numCols);
@@ -504,10 +514,15 @@ public:
 
     void addSum(NVMatrix& a, int axis, float scaleThis, float scaleSum);
     void addSum(NVMatrix& a, int axis, float scaleThis, float scaleSum, cudaStream_t stream);
+    void addMax(NVMatrix& a, int axis, float scaleThis, float scaleMax);
+    void addMax(NVMatrix& a, int axis, float scaleThis, float scaleMax, cudaStream_t stream);
     void sum(int axis, NVMatrix& target, cudaStream_t stream);
     void sum(int axis, NVMatrix& target);
+    void sum(int axis, NVMatrix& target, cudaStream_t stream, NVMatrix& tmp);
+    void sum(int axis, NVMatrix& target, NVMatrix& tmp);
     NVMatrix& sum(int axis);
     void max(int axis, NVMatrix& target);
+    void max(int axis, NVMatrix& target, NVMatrix& tmp);
     NVMatrix& max(int axis);
     void min(int axis, NVMatrix& target);
     NVMatrix& min(int axis);
@@ -523,7 +538,7 @@ public:
     float countNan();
     float norm2();
     float norm();
-    
+
     void inRangeInc(float lower, float upper);
     void inRangeInc(float lower, float upper, NVMatrix& target);
     void inRangeExc(float lower, float upper);

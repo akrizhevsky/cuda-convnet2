@@ -1254,6 +1254,9 @@ class PoolLayerParser(LayerWithInputParser):
         dic['imgPixels'] = dic['numInputs'][0] / dic['channels']
         dic['imgSize'] = int(n.sqrt(dic['imgPixels']))
         
+        if dic['pool'] == 'avg':
+            dic['sum'] = mcp.safe_get_bool(name, 'sum', default=False)
+        
         self.verify_num_range(dic['sizeX'], 'sizeX', 1, dic['imgSize'])
         self.verify_num_range(dic['stride'], 'stride', 1, dic['sizeX'])
         self.verify_num_range(dic['outputsX'], 'outputsX', 0, None)
