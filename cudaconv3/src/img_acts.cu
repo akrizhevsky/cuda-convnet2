@@ -684,6 +684,218 @@ __global__ void conv_img_acts_manycolor_kepler(const float* hidActs, const float
     }
 }
 
+/*****************************Function Revision Record*****************************
+ * Author: Tencent BestImage Team(ankerguo@tencent.com)                           *
+ * Date:   2015-05-18                                                             *
+ * Reason: Optimizing kernel to get faster speed according to GPU features        *
+ * Method:                                                                        *
+ *         1. reorganizing data structure to avoid bank conflict;                 *
+ *         2. using vectorized data type;                                         *
+ *         3. dividing loaded filter pixels into 2 parts in each step             *
+ * Note:   This function can be used when each thread loads even number of filter *
+ *         pixels(colorsPerThread * filterCacheF / B_X is even) and even number of*
+ *         hidAct pixels(imgsPerThread * filterCacheH / B_Y), and ff is 32, fh is *
+ *         16
+ *********************************************************************************/
+template <int B_Y, int B_X, int imgsPerThread, int colorsPerThread, int filterCacheF, int filterCacheH, bool scale, bool checkCaseBounds, bool conv>
+__global__ void conv_img_acts_manycolor_kepler_f_vec_h_vec_ff_32_fh_16(const float* hidActs, const float* filters, float* targets,
+                                          const int numModulesY, const int numModulesX, const int numImages, const int numFilters,
+                                          const int filterSize, const int imgSizeY, const int imgSizeX, const int paddingStart, const int moduleStride,
+                                          const int numImgColors, const int numGroups,
+                                          const float scaleTargets, const float scaleOutputs) {
+    // improve band width of shared memory by using 'float2' instead of 'float'
+    __shared__ float2 shFilters[filterCacheF/2][colorsPerThread*B_Y/2 + 2];
+    __shared__ float2 shHidActs[filterCacheH/2][B_X*imgsPerThread];
+
+    const int numImgBlocks = DIVUP(numImages,B_X*imgsPerThread);
+    const int blockCaseIdx = (blockIdx.x % numImgBlocks) * B_X*imgsPerThread;
+
+    const int imgColorIdx = (blockIdx.x / numImgBlocks) * B_Y*colorsPerThread; // color idx globally
+    const int numFilterColors = numImgColors / numGroups;
+    const int blockGroupIdx = imgColorIdx / numFilterColors;
+    const int filterColorIdx = imgColorIdx % numFilterColors; // color idx within group
+    const int numFiltersPerGroup = numFilters / numGroups;
+    const int blockFilterIdx = blockGroupIdx * numFiltersPerGroup;
+
+    const int blockPixelIdx = blockIdx.y;
+    const int blockPixelIdxX = blockPixelIdx % imgSizeX;
+    const int blockPixelIdxY = blockPixelIdx / imgSizeX;
+
+    const int filterPixels = filterSize * filterSize;
+    const int imgPixels = imgSizeY * imgSizeX;
+
+    const int tx = threadIdx.x % B_X, ty = threadIdx.y % B_Y;
+    const int tidx = ty * B_X + tx;
+
+    const int hidActLoadY = tidx / (imgsPerThread * B_X), hidActLoadX = tidx % (imgsPerThread * B_X);
+    const int filtersLoadY = tidx / (filterCacheF / 2), filtersLoadX = tidx % (filterCacheF / 2);
+    const int numModules = numModulesY * numModulesX;
+
+    hidActs += blockCaseIdx + (blockFilterIdx + hidActLoadY) * numImages * numModules + hidActLoadX;
+    filters += blockFilterIdx + (filterColorIdx + filtersLoadY) * filterPixels * numFilters + filtersLoadX;
+    targets += (imgColorIdx + ty) * imgPixels * numImages + blockPixelIdx * numImages + blockCaseIdx + tx;
+
+    float prod[colorsPerThread][imgsPerThread];
+    #pragma unroll
+    for (int c = 0; c < colorsPerThread; c++) {
+        #pragma unroll
+        for (int i = 0; i < imgsPerThread; i++) {
+            prod[c][i] = 0;
+        }
+    }
+
+    const int startY = blockPixelIdxY - paddingStart < filterSize ? 0
+                        : 1 + (blockPixelIdxY - paddingStart - filterSize) / moduleStride;
+    const int endY = min(numModulesY, 1 + (blockPixelIdxY - paddingStart) / moduleStride);
+    const int startX = blockPixelIdxX - paddingStart < filterSize ? 0
+                        : 1 + (blockPixelIdxX - paddingStart - filterSize) / moduleStride;
+    const int endX = min(numModulesX, 1 + (blockPixelIdxX - paddingStart) / moduleStride);
+
+    // temporary buffers to store preloaded pixel data
+    float fPreload[colorsPerThread * filterCacheF / B_X / 2];
+    float hPreload[imgsPerThread * filterCacheH / B_Y];
+
+    // preload filter's data 
+    const int pxStartIdxInFilter = (blockPixelIdxY - paddingStart - startY * moduleStride) * filterSize + blockPixelIdxX - paddingStart - startX * moduleStride;
+    const float *currFltData = conv ? &filters[pxStartIdxInFilter * numFilters] : &filters[pxStartIdxInFilter * numFilters + (startY * numModulesX + startX) * numFilterColors * filterPixels * numFilters] ;
+    #pragma unroll
+    for (int i = 0; i < colorsPerThread*B_Y; i+= B_X*B_Y / (filterCacheF/2)) {
+        fPreload[i * (filterCacheF/2) / (B_X * B_Y)] = currFltData[i * filterPixels * numFilters];
+    }
+
+    // preload hidAct's data
+    if (!checkCaseBounds || blockCaseIdx + hidActLoadX < numImages) {
+        #pragma unroll
+        for (int i = 0; i < filterCacheH; i += B_Y / imgsPerThread) {
+            hPreload[i * imgsPerThread / B_Y] = hidActs[(startY * numModulesX + startX) * numImages + i * numModules * numImages];
+        }
+    } else {
+        #pragma unroll
+        for (int i = 0; i < filterCacheH; i += B_Y / imgsPerThread) {
+            hPreload[i * imgsPerThread / B_Y] = 0;
+        }
+    }
+
+    for (int my = startY; my < endY; my++) {
+        const int moduleTop = paddingStart + my * moduleStride;
+        const int pxInFilterY = blockPixelIdxY - moduleTop;
+
+        for (int mx = startX; mx < endX; mx++) {
+            const int moduleIdx = my * numModulesX + mx;
+            const int moduleLeft = paddingStart + mx * moduleStride;
+            const int pxInFilterX = blockPixelIdxX - moduleLeft;
+
+            const int pxIdxInFilter = pxInFilterY * filterSize + pxInFilterX;
+
+            for (int f = 0; f < numFiltersPerGroup; f += filterCacheF) { // multiply with filterCacheF filters at a time
+                for (int fh = f; fh < f + filterCacheF; fh += filterCacheH) {
+                    // store the preloaded filter's data into shared memory
+                    #pragma unroll
+                    for (int c = 0; c < colorsPerThread * B_Y / 2; c += B_X*B_Y / (filterCacheF/2)) {
+                        shFilters[filtersLoadX][c + filtersLoadY].x = fPreload[c * (filterCacheF / 2) / (B_X * B_Y)];
+                        shFilters[filtersLoadX][c + filtersLoadY].y = fPreload[(c + colorsPerThread * B_Y / 2) * (filterCacheF / 2) / (B_X * B_Y)];
+                    }
+
+                    // store the preloaded hidAct's data into shared memory
+                    #pragma unroll
+                    for (int c = 0; c < filterCacheH / 2; c += B_Y / imgsPerThread) {
+                        shHidActs[c + hidActLoadY][hidActLoadX].x = hPreload[c * imgsPerThread/ B_Y];
+                        shHidActs[c + hidActLoadY][hidActLoadX].y = hPreload[(c + filterCacheH / 2) * imgsPerThread / B_Y];
+                    }
+                    
+                    /* preload filter and hidAct's data for next loop */
+                    if ((fh + filterCacheH) == numFiltersPerGroup) { // move to next pixel's position when all filters finished
+                        const int mxN = (mx < (endX - 1)) ? (mx + 1) : startX;
+                        const int myN = my + (mxN < mx);
+                        const int pxIdxInFilterN = (blockPixelIdxY - paddingStart - myN * moduleStride) * filterSize + blockPixelIdxX - paddingStart - mxN * moduleStride;
+                        const int moduleIdxN = myN * numModulesX + mxN;
+                        const float *currFlt = conv ? &filters[pxIdxInFilterN * numFilters] 
+                                                    : &filters[pxIdxInFilterN * numFilters + moduleIdxN * numFilterColors * filterPixels * numFilters] ;
+                        #pragma unroll
+                        for (int i = 0; i < colorsPerThread*B_Y; i+= B_X*B_Y / (filterCacheF/2)) {
+                            fPreload[i * (filterCacheF/2) / (B_X * B_Y)] = currFlt[i * filterPixels * numFilters];
+                        }
+
+
+                        if (!checkCaseBounds || blockCaseIdx + hidActLoadX < numImages) {
+                        #pragma unroll
+                            for (int i = 0; i < filterCacheH; i += B_Y / imgsPerThread) {
+                                hPreload[i * imgsPerThread / B_Y] = hidActs[moduleIdxN * numImages + i * numModules * numImages];
+                            }
+                        } else {
+                            #pragma unroll
+                            for (int i = 0; i < filterCacheH; i += B_Y / imgsPerThread) {
+                                hPreload[i * imgsPerThread / B_Y] = 0;
+                            }
+                        } 
+                    } else { // move to next filterCacheF
+                        const float *currFlt = conv ? &filters[pxIdxInFilter * numFilters + fh + filterCacheH] 
+                                                    : &filters[pxIdxInFilter * numFilters + fh + filterCacheH + moduleIdx * numFilterColors * filterPixels * numFilters] ;
+                        #pragma unroll
+                        for (int i = 0; i < colorsPerThread*B_Y; i+= B_X*B_Y / (filterCacheF/2)) {
+                            fPreload[i * (filterCacheF/2) / (B_X * B_Y)] = currFlt[i * filterPixels * numFilters];
+                        }
+
+
+                        if (!checkCaseBounds || blockCaseIdx + hidActLoadX < numImages) {
+                        #pragma unroll
+                            for (int i = 0; i < filterCacheH; i += B_Y / imgsPerThread) {
+                                hPreload[i * imgsPerThread / B_Y] = hidActs[(moduleIdx + (fh + filterCacheH) * numModules) * numImages + i * numModules * numImages];
+                            }
+                        } else {
+                            #pragma unroll
+                            for (int i = 0; i < filterCacheH; i += B_Y / imgsPerThread) {
+                                hPreload[i * imgsPerThread / B_Y] = 0;
+                            }
+                        } 
+                    }
+                    __syncthreads();
+
+                    // computation
+                    #pragma unroll
+                    for (int w = 0; w < filterCacheH/2; w++) {
+                        #pragma unroll
+                        for (int c = 0; c < colorsPerThread/2; c++) {
+                            #pragma unroll
+                            for (int i = 0; i < imgsPerThread; i++) {
+                                prod[c][i]                       += shFilters[w][c * B_Y + ty].x                    * shHidActs[w][tx + i * B_X].x;
+                                prod[c][i]                       += shFilters[w + filterCacheH / 2][c * B_Y + ty].x * shHidActs[w][tx + i * B_X].y;
+                                prod[c + colorsPerThread / 2][i] += shFilters[w][c * B_Y + ty].y                    * shHidActs[w][tx + i * B_X].x;
+                                prod[c + colorsPerThread / 2][i] += shFilters[w + filterCacheH / 2][c * B_Y + ty].y * shHidActs[w][tx + i * B_X].y;
+
+                            }
+                        }
+                    }
+                    __syncthreads();
+
+                }
+            }
+        }
+    }
+
+    // store the result into global memory
+    if (scale) {
+        #pragma unroll
+        for (int i = 0; i < imgsPerThread; i++) {
+            if (!checkCaseBounds || blockCaseIdx + tx + i * B_X < numImages) {
+                #pragma unroll
+                for (int c = 0; c < colorsPerThread; c++) {
+                    targets[c * B_Y * imgPixels * numImages + i * B_X] = scaleTargets * targets[c * B_Y * imgPixels * numImages + i * B_X] + scaleOutputs * prod[c][i];
+                }
+            }
+        }
+    } else {
+        #pragma unroll
+        for (int i = 0; i < imgsPerThread; i++) {
+            if (!checkCaseBounds || blockCaseIdx + tx + i * B_X < numImages) {
+                #pragma unroll
+                for (int c = 0; c < colorsPerThread; c++) {
+                    targets[c * B_Y * imgPixels * numImages + i * B_X] = scaleOutputs * prod[c][i];
+                }
+            }
+        }
+    }
+}
 /*
  * New Titan-optimized stuff.
  */
@@ -736,9 +948,22 @@ for (int w = 0; w < filterCacheH; w++) { \
     hPreload[y][x] =  tex1Dfetch<float>(hidActs, hidActsLoadOffset + (y) * B_Y * numModules * numImages + (x) * B_X); \
 }
 
+/*****************************Function Revision Record*****************************
+ * Author: Tencent BestImage Team(ankerguo@tencent.com)                           *
+ * Date:   2015-05-18                                                             *
+ * Reason: Optimizing kernel to get faster speed according to GPU features        *
+ * Method:                                                                        *
+ *         1. reorganizing data structure to avoid bank conflict;                 *
+ *         2. using vectorized data type;                                         *
+ *         3. improving instruction-level parallelism;                            *
+ *         4. removing redundant 'if' branches;                                   *
+ *         5. removing local variables to save registers.                         *
+ *         6. dividing the process into two steps with less data loaded.          *
+ *********************************************************************************/
+
 template <int B_Y, int B_X, int imgsPerThread, int colorsPerThread, int filterCacheF, int filterCacheH, bool scale, bool checkCaseBounds, bool conv>
 __global__ void
-__launch_bounds__(256, 2)   // 256 threads per block, 2 blocks per multiprocessor
+__launch_bounds__(256, 3)   // 256 threads per block, 3 blocks per multiprocessor
                             // These launch bounds ensure 25% occupancy (128 registers used)
                             // as oppposed to 13% (130 registers) achieved by defaults.
 conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex(cudaTextureObject_t hidActs, cudaTextureObject_t filters, float* targets,
@@ -746,39 +971,43 @@ conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex(cudaTextureObje
                                           const int filterSize, const int imgSizeY, const int imgSizeX, const int paddingStart, const int moduleStride,
                                           const int numImgColors, const int numGroups,
                                           const float scaleTargets, const float scaleOutputs) {
-    __shared__ float shFilters[colorsPerThread*B_Y][filterCacheF];
-    __shared__ float shHidActs[filterCacheH][B_X*imgsPerThread];
+    // avoid bank conflict by re-organizing the data structure, and improve band width by using 'float2' instead of 'float'
+    __shared__ float2 shFilters[filterCacheF/2][colorsPerThread*B_Y/2 + 2];
+    __shared__ float2 shHidActs[filterCacheH][B_X*imgsPerThread/2];
 
+    const int tx = threadIdx.x, ty = threadIdx.y;
     const int numImgBlocks = DIVUP(numImages,B_X*imgsPerThread);
-    const int blockCaseIdx = (blockIdx.x % numImgBlocks) * B_X*imgsPerThread;
-    const int myCaseIdx = blockCaseIdx + threadIdx.x;
+    //const int blockCaseIdx = (blockIdx.x % numImgBlocks) * B_X*imgsPerThread;
+    //const int myCaseIdx = blockCaseIdx + threadIdx.x;
 
-    const int imgColorIdx = (blockIdx.x / numImgBlocks) * B_Y*colorsPerThread; // color idx globally
+    //const int imgColorIdx = (blockIdx.x / numImgBlocks) * B_Y*colorsPerThread; // color idx globally
     const int numFilterColors = numImgColors / numGroups;
-    const int blockGroupIdx = imgColorIdx / numFilterColors;
-    const int filterColorIdx = imgColorIdx % numFilterColors; // color idx within group
+    const int blockGroupIdx = (blockIdx.x / numImgBlocks) * B_Y * colorsPerThread / numFilterColors;
+    const int filterColorIdx = ((blockIdx.x / numImgBlocks) * B_Y * colorsPerThread) % numFilterColors; // color idx within group
     const int numFiltersPerGroup = numFilters / numGroups;
-    const int blockFilterIdx = blockGroupIdx * numFiltersPerGroup;
+    //const int blockFilterIdx = blockGroupIdx * numFiltersPerGroup;
 
-    const int blockPixelIdx = blockIdx.y;
-    const int blockPixelIdxX = blockPixelIdx % imgSizeX;
-    const int blockPixelIdxY = blockPixelIdx / imgSizeX;
+    //const int blockPixelIdx = blockIdx.y;
+    const int blockPixelIdxX = blockIdx.y % imgSizeX;
+    const int blockPixelIdxY = blockIdx.y / imgSizeX;
 
-    const int filterPixels = filterSize * filterSize;
-    const int imgPixels = imgSizeY * imgSizeX;
-    const int tidx = threadIdx.y * B_X + threadIdx.x;
+    //const int filterPixels = filterSize * filterSize;
+    const int filterPxlAll = filterSize * filterSize * numFilters;
+    //const int imgPixels = imgSizeY * imgSizeX;
+    //const int tidx = threadIdx.y * B_X + threadIdx.x;
 //    const int hidActLoadY = threadIdx.y % B_Y, hidActLoadX = threadIdx.x % B_X;
     //const int hidActLoadY = tidx / (B_X*imgsPerThread), hidActLoadX = tidx % (B_X*imgsPerThread);
-    const int filtersLoadY = tidx / filterCacheF, filtersLoadX = tidx % filterCacheF;
+    //const int filtersLoadY = tidx / filterCacheF, filtersLoadX = tidx % filterCacheF;
     // nvcc is behaving idiotically again, these useless declarations save registers
     //const int outputY = threadIdx.y, outputX = threadIdx.x;
     //const int ty = threadIdx.y, tx = threadIdx.x;
-    const int numModules = numModulesY * numModulesX;
-    const int hidActsOffset = (blockFilterIdx + threadIdx.y) * numImages * numModules + myCaseIdx;
-    const int filtersOffset = blockFilterIdx + (filterColorIdx + filtersLoadY) * filterPixels * numFilters + filtersLoadX;
+    //const int numModules = numModulesY * numModulesX;
+    const int numImgMods = numModulesY * numModulesX * numImages;  
+    const int hidActsOffset = (blockGroupIdx * numFiltersPerGroup + ty) * numImgMods + (blockIdx.x % numImgBlocks) * B_X * imgsPerThread + tx;
+    const int filtersOffset = blockGroupIdx * numFiltersPerGroup + (filterColorIdx + (ty * B_X + tx) / filterCacheH) * filterPxlAll + (ty * B_X + tx) % filterCacheH;
 //    hidActs += (blockFilterIdx + threadIdx.y) * numImages * numModules + myCaseIdx;
 //    filters += blockFilterIdx + (filterColorIdx + filtersLoadY) * filterPixels * numFilters + filtersLoadX;
-    targets += (imgColorIdx + threadIdx.y) * imgPixels * numImages + blockPixelIdx * numImages + myCaseIdx;
+    targets += ((blockIdx.x / numImgBlocks) * B_Y * colorsPerThread + ty) * imgSizeY * imgSizeX * numImages + blockIdx.y * numImages + (blockIdx.x % numImgBlocks) * 128 + tx;
 
     float prod[colorsPerThread][imgsPerThread];
     #pragma unroll
@@ -796,15 +1025,16 @@ conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex(cudaTextureObje
                         : 1 + (blockPixelIdxX - paddingStart - filterSize) / moduleStride;
     const int endX = min(numModulesX, 1 + (blockPixelIdxX - paddingStart) / moduleStride);
 
-    float* shFilterLoad = &shFilters[filtersLoadY][filtersLoadX];
-    float* shHidActLoad = &shHidActs[threadIdx.y][threadIdx.x * imgsPerThread];
+    // reduce two registers
+    //float* shFilterLoad = &shFilters[filtersLoadY][filtersLoadX];
+    //float* shHidActLoad = &shHidActs[threadIdx.y][threadIdx.x * imgsPerThread];
     //const bool noFLoop = filterCacheF == filterCacheH;
 
     /*
      * Initial preload
      */
-    float hPreload[filterCacheH/B_Y][imgsPerThread]; // [2][4]
-    float wPreload[filterCacheF*colorsPerThread/B_X]; // [8]
+    float hPreload[filterCacheH/B_Y * imgsPerThread]; // [2][4]
+    float wPreload[filterCacheF*colorsPerThread/B_X/2]; // [4]
 
     int moduleIdx, pxIdxInFilter;
     conv_img_acts_manycolor_preload_ty_8_tx_32_c_8_ff_32_fh_16_setCoords(startY, startX, numModulesX, paddingStart, moduleStride, blockPixelIdxY,
@@ -812,145 +1042,106 @@ conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex(cudaTextureObje
 //    const float* fLoad = conv ? &filters[pxIdxInFilter * numFilters + 0]
 //                              : &filters[moduleIdx * numFilterColors * filterPixels * numFilters + pxIdxInFilter * numFilters + 0];
     int filtersLoadOffset = filtersOffset + (conv ? pxIdxInFilter * numFilters + 0
-                                                  : moduleIdx * numFilterColors * filterPixels * numFilters + pxIdxInFilter * numFilters);
+                                                  : moduleIdx * numFilterColors * filterPxlAll + pxIdxInFilter * numFilters);
+    // preload the filter's pixel
     #pragma unroll
-    for (int i = 0; i < colorsPerThread*B_Y; i+= B_X*B_Y/filterCacheF) {
-        if ((colorsPerThread*B_Y) % (B_X*B_Y/filterCacheF) == 0 || i + filtersLoadY < colorsPerThread*B_Y) {
-            wPreload[i * filterCacheF/(B_X*B_Y)] = tex1Dfetch<float>(filters, filtersLoadOffset + i * filterPixels * numFilters);
-        }
+    for (int i = 0; i < 4; i++) {
+        // discarding redundant conditions  
+        wPreload[i] = tex1Dfetch<float>(filters, filtersLoadOffset + i * 16 * filterPxlAll);
     }
 
 //    const float* hLoad = &hidActs[(moduleIdx + 0 * numModules) * numImages];
-    int hidActsLoadOffset = hidActsOffset + (moduleIdx + 0 * numModules) * numImages;
+    int hidActsLoadOffset = hidActsOffset + moduleIdx * numImages;
+    
+    // preload the hidAct's pixel
     #pragma unroll
-    for (int j = 0; j < filterCacheH; j += B_Y) {
-        if (filterCacheH % B_Y == 0 || threadIdx.y + j < filterCacheH) {
-            #pragma unroll
-            for (int i = 0; i < imgsPerThread; i++) {
-                if (!checkCaseBounds || myCaseIdx + i * B_X < numImages) {
-                    hPreload[j/B_Y][i] = tex1Dfetch<float>(hidActs, hidActsLoadOffset + j * numModules * numImages + i * B_X);
-                }
-            }
-        }
+    for (int x = 0; x < 4; x++) {
+        hPreload[x]   = tex1Dfetch<float>(hidActs, hidActsLoadOffset + x * 32); 
+        hPreload[x+4] = tex1Dfetch<float>(hidActs, hidActsLoadOffset + 8 * numImgMods + x * 32); 
     }
 
     for (int my = startY; my < endY; my++) {
-        const int moduleTop = paddingStart + my * moduleStride;
-        const int pxInFilterY = blockPixelIdxY - moduleTop;
 
         for (int mx = startX; mx < endX; mx++) {
-            moduleIdx = my * numModulesX + mx;
-            const int moduleLeft = paddingStart + mx * moduleStride;
-            const int pxInFilterX = blockPixelIdxX - moduleLeft;
+            conv_img_acts_manycolor_preload_ty_8_tx_32_c_8_ff_32_fh_16_setCoords(my+(mx+1 == endX), (mx+1 == endX)?startX:(mx+1), numModulesX, paddingStart, moduleStride, blockPixelIdxY, blockPixelIdxX, filterSize, moduleIdx, pxIdxInFilter);
 
-            pxIdxInFilter = pxInFilterY * filterSize + pxInFilterX;
-            int myNext = my, mxNext = mx, moduleIdxNext, pxIdxInFilterNext;
-            const bool lastModule = my == endY - 1 && mx == endX - 1;
-            if (!lastModule) {
-                mxNext = mx + 1 == endX ? startX : mx + 1;
-                myNext = my + (mx + 1 == endX);
-            }
-            conv_img_acts_manycolor_preload_ty_8_tx_32_c_8_ff_32_fh_16_setCoords(myNext, mxNext, numModulesX, paddingStart, moduleStride, blockPixelIdxY,
-                                                                                 blockPixelIdxX, filterSize, moduleIdxNext, pxIdxInFilterNext);
             for (int f = 0; f < numFiltersPerGroup; f += filterCacheF) { // multiply with filterCacheF filters at a time
-                #pragma unroll
-                for (int i = 0; i < colorsPerThread*B_Y; i+= B_X*B_Y/filterCacheF) {
-                    if ((colorsPerThread*B_Y) % (B_X*B_Y/filterCacheF) == 0 || i + filtersLoadY < colorsPerThread*B_Y) {
-                        shFilterLoad[i * filterCacheF] = wPreload[i * filterCacheF/(B_X*B_Y)];
+                // As 'filterCacheF' is two times of 'filterCacheH', so divide the procedure into two steps, which loads less data during each step
+                // with this division, program would not stall at memory access, and get higher gpu occupancy
+                for (int k = 0; k < filterCacheF / filterCacheH; k++) {
+                    // store the preloaded filters's pixel into shared memory with 64 bit width
+                    shFilters[(ty * B_X + tx) % 16][(ty * B_X + tx) / 16].x = wPreload[0];
+                    shFilters[(ty * B_X + tx) % 16][(ty * B_X + tx) / 16].y = wPreload[2];
+                    shFilters[(ty * B_X + tx) % 16][(ty * B_X + tx) / 16 + 16].x = wPreload[1];
+                    shFilters[(ty * B_X + tx) % 16][(ty * B_X + tx) / 16 + 16].y = wPreload[3];
+
+                    // store the preloaded hidacts' pixel into shared memory with 64 bit width
+                    shHidActs[ty][tx].x = hPreload[0];
+                    shHidActs[ty][tx].y = hPreload[1];
+                    shHidActs[ty][tx + B_X].x = hPreload[2];
+                    shHidActs[ty][tx + B_X].y = hPreload[3];
+                    shHidActs[ty + filterCacheH/2][tx].x = hPreload[4];
+                    shHidActs[ty + filterCacheH/2][tx].y = hPreload[5];
+                    shHidActs[ty + filterCacheH/2][tx + B_X].x = hPreload[6];
+                    shHidActs[ty + filterCacheH/2][tx + B_X].y = hPreload[7];
+
+                    // update to the 2nd 'filterCacheH' 
+                    filtersLoadOffset += filterCacheH;
+                    hidActsLoadOffset += filterCacheH * numImgMods;
+
+                    // move to the next pixel
+                    if ((k == 1) && (f == numFiltersPerGroup - filterCacheF))  {
+                        filtersLoadOffset = filtersOffset + (conv ? pxIdxInFilter * numFilters
+                                            : moduleIdx * numFilterColors * filterPxlAll + pxIdxInFilter * numFilters);
+                        hidActsLoadOffset = hidActsOffset + moduleIdx * numImages;
                     }
-                }
 
-                filtersLoadOffset = filtersOffset + (conv ? pxIdxInFilter * numFilters + f + filterCacheF
-                                                          : moduleIdx * numFilterColors * filterPixels * numFilters + pxIdxInFilter * numFilters + f + filterCacheF);
-                if (f == numFiltersPerGroup - filterCacheF) {
-                    filtersLoadOffset = filtersOffset + (conv ? pxIdxInFilterNext * numFilters
-                                                              : moduleIdxNext * numFilterColors * filterPixels * numFilters + pxIdxInFilterNext * numFilters);
-                }
+                    // preloade filter's pixel 
+                    #pragma unroll 4
+                    for (int x = 0; x < 4; x++) {
+                        wPreload[x] = tex1Dfetch<float>(filters, filtersLoadOffset + x * 16 * filterPxlAll);
+                    }
 
-                #pragma unroll
-                for (int j = 0; j < filterCacheH; j += B_Y) {
-                    if (filterCacheH % B_Y == 0 || threadIdx.y + j < filterCacheH) {
+                    __syncthreads();
+
+
+                    // put together the instructions with same type to improve instruction-level parallelism 
+                    // calculate the derivative of the hidAct with respect to image
+                    #pragma unroll 
+                    for (int w = 0; w < filterCacheH; w++) {
                         #pragma unroll
-                        for (int i = 0; i < imgsPerThread; i++) {
-                            // NOTE: bank conflicts here!
-                            if (!checkCaseBounds || myCaseIdx + i * B_X < numImages) {
-                                shHidActLoad[j * B_X * imgsPerThread + i] = hPreload[j/B_Y][i];
-                            }
-                        }
+                        for (int c = 0; c < colorsPerThread / 2; c++) { 
+                            prod[c][0] += shFilters[w][c * B_Y + ty].x * shHidActs[w][tx].x; 
+                            prod[c][1] += shFilters[w][c * B_Y + ty].x * shHidActs[w][tx].y; 
+                            prod[c][2] += shFilters[w][c * B_Y + ty].x * shHidActs[w][tx+B_X].x; 
+                            prod[c][3] += shFilters[w][c * B_Y + ty].x * shHidActs[w][tx+B_X].y; 
+                            prod[c + colorsPerThread / 2][0] += shFilters[w][c * B_Y + ty].y * shHidActs[w][tx].x;
+                            prod[c + colorsPerThread / 2][1] += shFilters[w][c * B_Y + ty].y * shHidActs[w][tx].y; 
+                            prod[c + colorsPerThread / 2][2] += shFilters[w][c * B_Y + ty].y * shHidActs[w][tx+B_X].x; 
+                            prod[c + colorsPerThread / 2][3] += shFilters[w][c * B_Y + ty].y * shHidActs[w][tx+B_X].y; 
+                        } 
                     }
-                }
 
-                __syncthreads();
-
-                hidActsLoadOffset = hidActsOffset + (moduleIdx + (f + filterCacheH) * numModules) * numImages;
-
-                #pragma unroll
-                for (int z = 0; z < 4; ++z) {
-                    IA_PRELOAD_LOOP(z,0);
-                    IA_PRELOAD_W_TX(z);
-                }
-
-                #pragma unroll
-                for (int z = 4; z < 12; ++z) {
-                    IA_PRELOAD_LOOP(z,0);
-                    IA_PRELOAD_H_TX((z-4)/4,z%4);
-                }
-
-                #pragma unroll
-                for (int z = 12; z < 16; ++z) {
-                    IA_PRELOAD_LOOP(z,0);
-                }
-
-                __syncthreads();
-
-                #pragma unroll
-                for (int j = 0; j < filterCacheH; j += B_Y) {
-                    if (filterCacheH % B_Y == 0 || threadIdx.y + j < filterCacheH) {
-                        #pragma unroll
-                        for (int i = 0; i < imgsPerThread; i++) {
-                            if (!checkCaseBounds || myCaseIdx + i * B_X < numImages) {
-                                shHidActLoad[j * B_X * imgsPerThread + i] = hPreload[j/B_Y][i];
-                            }
-                        }
+                    // preloade the hidAct's pixel
+                    #pragma unroll
+                    for (int x = 0; x < 4; x++) {
+                        hPreload[x]   = tex1Dfetch<float>(hidActs, hidActsLoadOffset + x * B_X); 
+                        hPreload[x+4] = tex1Dfetch<float>(hidActs, hidActsLoadOffset + 8 * numImgMods + x * B_X); 
                     }
+
+                    __syncthreads();
                 }
-
-                __syncthreads();
-
-                hidActsLoadOffset = hidActsOffset + (moduleIdx + (f + filterCacheF) * numModules) * numImages;
-                if (f == numFiltersPerGroup - filterCacheF) {
-                    hidActsLoadOffset = hidActsOffset + moduleIdxNext * numImages;
-                }
-
-                #pragma unroll
-                for (int z = 0; z < 4; ++z) {
-                    IA_PRELOAD_LOOP(z,filterCacheH);
-                    IA_PRELOAD_W_TX(z+4);
-                }
-
-                #pragma unroll
-                for (int z = 4; z < 12; ++z) {
-                    IA_PRELOAD_LOOP(z,filterCacheH);
-                    IA_PRELOAD_H_TX((z-4)/4, z%4);
-                }
-
-                #pragma unroll
-                for (int z = 12; z < 16; ++z) {
-                    IA_PRELOAD_LOOP(z,filterCacheH);
-                }
-
-                __syncthreads();
             }
         }
     }
+    
+    // remove redundant conditions for less registers
     if (scale) {
         #pragma unroll
         for (int c = 0; c < colorsPerThread; c++) {
             #pragma unroll
             for (int i = 0; i < imgsPerThread; i++) {
-                if (!checkCaseBounds || myCaseIdx + i * B_X < numImages) {
-                    targets[c * B_Y * imgPixels * numImages + i * B_X] = scaleTargets * targets[c * B_Y * imgPixels * numImages + i * B_X] + scaleOutputs * prod[c][i];
-                }
+                targets[c * B_Y * imgSizeY * imgSizeX * numImages + i * B_X] = scaleTargets * targets[c * B_Y * imgSizeY * imgSizeX * numImages + i * B_X] + scaleOutputs * prod[c][i];
             }
         }
     } else {
@@ -958,9 +1149,7 @@ conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex(cudaTextureObje
         for (int c = 0; c < colorsPerThread; c++) {
             #pragma unroll
             for (int i = 0; i < imgsPerThread; i++) {
-                if (!checkCaseBounds || myCaseIdx + i * B_X < numImages) {
-                    targets[c * B_Y * imgPixels * numImages + i * B_X] = scaleOutputs * prod[c][i];
-                }
+                targets[c * B_Y * imgSizeY * imgSizeX * numImages + i * B_X] = scaleOutputs * prod[c][i];
             }
         }
     }
@@ -1286,6 +1475,8 @@ void _imgActs(NVMatrix& hidActs, NVMatrix& filters, NVMatrix& targets,
 //    printf("numImages: %d\n", numImages);
 //    cudaStream_t stream = NVMatrix::getDefaultStream();
 
+    checkCudaErrors(cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte));
+    
     if (conv == true) {
         if (scale == false) {
             if (checkCaseBounds == false) {
@@ -1297,12 +1488,12 @@ void _imgActs(NVMatrix& hidActs, NVMatrix& filters, NVMatrix& targets,
                                 conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, false, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                             }
                             else if (numImages % 64 == 0) {
-                                cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 2, 8, 32, 16, false, false, true >, cudaFuncCachePreferShared);
-                                conv_img_acts_manycolor_kepler < 8, 32, 2, 8, 32, 16, false, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getDevData(), filters.getDevData(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
+                                cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler_f_vec_h_vec_ff_32_fh_16 < 8, 32, 2, 8, 32, 16, false, false, true >, cudaFuncCachePreferShared);
+                                conv_img_acts_manycolor_kepler_f_vec_h_vec_ff_32_fh_16 < 8, 32, 2, 8, 32, 16, false, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getDevData(), filters.getDevData(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                             }
                             else if (numImages % 32 == 0) {
-                                cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 1, 8, 32, 16, false, false, true >, cudaFuncCachePreferShared);
-                                conv_img_acts_manycolor_kepler < 8, 32, 1, 8, 32, 16, false, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getDevData(), filters.getDevData(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
+                                cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler_f_vec_h_vec_ff_32_fh_16 < 8, 32, 1, 8, 32, 16, false, false, true >, cudaFuncCachePreferShared);
+                                conv_img_acts_manycolor_kepler_f_vec_h_vec_ff_32_fh_16 < 8, 32, 1, 8, 32, 16, false, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getDevData(), filters.getDevData(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                             }
                             else if (numImages % 16 == 0) {
                                 cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 1, 8, 32, 16, false, false, true >, cudaFuncCachePreferShared);
@@ -1643,12 +1834,12 @@ void _imgActs(NVMatrix& hidActs, NVMatrix& filters, NVMatrix& targets,
                                 conv_img_acts_manycolor_preloadfh_ty_8_tx_32_c_8_ff_32_fh_16_tex< 8, 32, 4, 8, 32, 16, true, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getTextureObject(), filters.getTextureObject(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                             }
                             else if (numImages % 64 == 0) {
-                                cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 2, 8, 32, 16, true, false, true >, cudaFuncCachePreferShared);
-                                conv_img_acts_manycolor_kepler < 8, 32, 2, 8, 32, 16, true, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getDevData(), filters.getDevData(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
+                                cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler_f_vec_h_vec_ff_32_fh_16 < 8, 32, 2, 8, 32, 16, true, false, true >, cudaFuncCachePreferShared);
+                                conv_img_acts_manycolor_kepler_f_vec_h_vec_ff_32_fh_16 < 8, 32, 2, 8, 32, 16, true, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getDevData(), filters.getDevData(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                             }
                             else if (numImages % 32 == 0) {
-                                cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 1, 8, 32, 16, true, false, true >, cudaFuncCachePreferShared);
-                                conv_img_acts_manycolor_kepler < 8, 32, 1, 8, 32, 16, true, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getDevData(), filters.getDevData(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
+                                cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler_f_vec_h_vec_ff_32_fh_16 < 8, 32, 1, 8, 32, 16, true, false, true >, cudaFuncCachePreferShared);
+                                conv_img_acts_manycolor_kepler_f_vec_h_vec_ff_32_fh_16 < 8, 32, 1, 8, 32, 16, true, false, true ><<<blocks, threads, 0, stream>>>(hidActs.getDevData(), filters.getDevData(), targets.getDevData(), numModulesY, numModulesX, numImages, numFilters, filterSize, imgSizeY, imgSizeX, paddingStart, moduleStride, numImgColors, numGroups, scaleTargets, scaleOutput);
                             }
                             else if (numImages % 16 == 0) {
                                 cudaFuncSetCacheConfig(conv_img_acts_manycolor_kepler < 8, 32, 1, 8, 32, 16, true, false, true >, cudaFuncCachePreferShared);
@@ -2675,6 +2866,7 @@ void _imgActs(NVMatrix& hidActs, NVMatrix& filters, NVMatrix& targets,
         }
     }
 
+    checkCudaErrors(cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeFourByte));
     getLastCudaError("imgActs: kernel execution failed");
 }
 

@@ -1367,6 +1367,17 @@ __global__ void conv_weight_acts_c_preload_pc_2_pt_4_f_3_r_32_c_3(cudaTextureObj
     }
 }
 
+/*****************************Function Revision Record*****************************
+ * Author: Tencent BestImage Team(ankerguo@tencent.com)                           *
+ * Date:   2015-05-18                                                             *
+ * Reason: Optimizing kernel to get faster speed according to GPU features        *
+ * Method:                                                                        *
+ *         1. reorganizing data structure to avoid bank conflict;                 *
+ *         2. using vectorized data type;                                         *
+ *         3. improving instruction-level parallelism;                            *
+ *         4. removing redundant 'if' branches;                                   *
+ *         5. removing local variables to save registers.                         *
+ *********************************************************************************/
 
 /*
  * images:      (numImgColors, imgSizeY, imgSizeX, numImages), with stride given
@@ -1383,10 +1394,12 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_16_f_4_c_8_r_16(cu
                                        const int paddingStart, const int moduleStride, const int imgStride,
                                        const int numImgColors, const int numGroups, const int sumWidth,
                                        const float scaleTargets, const float scaleOutputs) {
-    __shared__ float shImages[colorsPerThread * B_Y][preloadCases]; // preload preloadCases cases
-    __shared__ float shHidActs[filtersPerThread * B_X][preloadCases + 1]; // preload preloadCases cases of B_X hidacts
+    // avoid bank conflict by reorganizing the data structure, and improve the band width by using 'float2'  instead of 'float'
+    __shared__ float2 shImages[preloadCases][colorsPerThread * B_Y / 2 + 2]; // preload preloadCases cases
+    __shared__ float2 shHidActs[preloadCases][filtersPerThread * B_X / 2 + 2]; // preload preloadCases cases of B_X hidacts
 
-    const int tidx = B_X * threadIdx.y + threadIdx.x;
+    const int tx = threadIdx.x % B_X, ty = threadIdx.y % B_Y;
+    const int tidx = B_X * ty + tx;
     const int loadY = tidx / preloadCases, loadX = tidx % preloadCases;
 
     const int filterPixels = filterSize * filterSize;
@@ -1428,24 +1441,25 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_16_f_4_c_8_r_16(cu
 //            + loadX;
 
     targets += blockModuleChunkIdx * numFilters * filterPixels * numFilterColors
-            + (blockFilterColorIdx + threadIdx.y) * filterPixels * numFilters
+            + (blockFilterColorIdx + ty) * filterPixels * numFilters
             + blockPixelOffset * numFilters
             + blockFilterIdx
-            + threadIdx.x;
-//    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0) return;
+            + tx;
+    // if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0) return;
 
     const int mStartX = max(blockModuleStartX, DIVUP(-blockPixelX - paddingStart, moduleStride));
     const int mStartY = max(blockModuleStartY, DIVUP(-blockPixelY - paddingStart, moduleStride));
     const int mEndX = min(numModulesX, min(blockModuleStartX + sumWidth, DIVUP(imgSizeX - blockPixelX - paddingStart, moduleStride)));
     const int mEndY = min(numModulesY, min(blockModuleStartY + sumWidth, DIVUP(imgSizeY - blockPixelY - paddingStart, moduleStride)));
 
-//    if (mStartY == mEndY || mStartX == mEndX) {
-//        return;
-//    }
-//    const bool doWork = mStartY < mEndY && mStartX < mEndX;
+    // if (mStartY == mEndY || mStartX == mEndX) {
+    //     return;
+    // }
+    const bool doWork = mStartY < mEndY && mStartX < mEndX;
 
-    float* shHidActLoad = &shHidActs[loadY][loadX];
-    float* shImgLoad = &shImages[loadY][loadX];
+    // reduce 2 registers
+    //float* shHidActLoad = &shHidActs[loadY][loadX];
+    //float* shImgLoad = &shImages[loadY][loadX];
 
     float imPreload[preloadCases*colorsPerThread/B_X]; // [8]
     float haPreload[preloadCases*filtersPerThread/B_Y]; // [8]
@@ -1466,18 +1480,23 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_16_f_4_c_8_r_16(cu
             blockPixelY, blockPixelX, imgSizeX, imgStride,
             pixIdx, m);
 
+    if (doWork) {
     #pragma unroll
-    for (int y = 0; y < B_Y * colorsPerThread; y += (B_X * B_Y) / preloadCases) {
-        // It's bizarre, but this is the fastest way I've found to get it not to load nonexistent pixels.
-        // All other ways cause crazy excessive register usage.
-        const int idx = (mStartY < mEndY && mStartX < mEndX) * (0 + y * imgPixels * imgStride + pixIdx);
-        imPreload[y * preloadCases/(B_X * B_Y)] = tex1Dfetch<float>(images, imgOffset + idx);
+        for (int y = 0; y < B_Y * colorsPerThread; y += (B_X * B_Y) / preloadCases) {
+            // It's bizarre, but this is the fastest way I've found to get it not to load nonexistent pixels.
+            // All other ways cause crazy excessive register usage.
+            const int idx = (mStartY < mEndY && mStartX < mEndX) * (0 + y * imgPixels * imgStride + pixIdx);
+            imPreload[y * preloadCases/(B_X * B_Y)] = tex1Dfetch<float>(images, imgOffset + idx);
+        }
     }
-    #pragma unroll
-    for (int y = 0; y < B_X * filtersPerThread; y += (B_X * B_Y) / preloadCases) {
-        // Almost certainly not necessary here.
-        const int idx = (mStartY < mEndY && mStartX < mEndX) * (0 + y * numImages * numModules + m * numImages);
-        haPreload[y * preloadCases / (B_X * B_Y)] = tex1Dfetch<float>(hidActs, hidActsOffset + idx);
+    
+    if (doWork) {
+        #pragma unroll
+        for (int y = 0; y < B_X * filtersPerThread; y += (B_X * B_Y) / preloadCases) {
+            // Almost certainly not necessary here.
+            const int idx = (mStartY < mEndY && mStartX < mEndX) * (0 + y * numImages * numModules + m * numImages);
+            haPreload[y * preloadCases / (B_X * B_Y)] = tex1Dfetch<float>(hidActs, hidActsOffset + idx);
+        }
     }
 
 
@@ -1497,13 +1516,14 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_16_f_4_c_8_r_16(cu
                     pixIdxNext, mNext);
 
             for (int caseIdx = 0; caseIdx < numImages; caseIdx += preloadCases) {
-
+                // store the preloaded image's pixel into shared memory
                 #pragma unroll
-                for (int y = 0; y < B_Y * colorsPerThread; y += (B_X * B_Y) / preloadCases) {
-                    shImgLoad[(y) * preloadCases] = imPreload[y * preloadCases / (B_X * B_Y)];
+                for (int y = 0; y < 4; y++) {
+                    shImages[loadX][loadY+y*8].x = imPreload[y];
+                    shImages[loadX][loadY+y*8].y = imPreload[y+4];
                 }
-//                const float* im = &images[caseIdx + preloadCases + pixIdx];
-//                const float* ha = &hidActs[caseIdx + preloadCases + m * numImages];
+                //const float* im = &images[caseIdx + preloadCases + pixIdx];
+                //const float* ha = &hidActs[caseIdx + preloadCases + m * numImages];
                 int imgOffset2 = imgOffset + caseIdx + preloadCases + pixIdx;
                 int hidActsOffset2 = hidActsOffset + caseIdx + preloadCases + m * numImages;
                 if (caseIdx + preloadCases == numImages) {
@@ -1512,24 +1532,40 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_16_f_4_c_8_r_16(cu
                     imgOffset2 = imgOffset + pixIdxNext;
                     hidActsOffset2 = hidActsOffset + mNext * numImages;
                 }
+        
+                // store the images and hidActs 
+                shHidActs[loadX][loadY].x = haPreload[0];
+                shHidActs[loadX][loadY].y = haPreload[2];
+                shHidActs[loadX][loadY+16].x = haPreload[4];
+                shHidActs[loadX][loadY+16].y = haPreload[6];
+                shHidActs[loadX][loadY+8].x = haPreload[1];
+                shHidActs[loadX][loadY+8].y = haPreload[3];
+                shHidActs[loadX][loadY+24].x = haPreload[5];
+                shHidActs[loadX][loadY+24].y = haPreload[7];
+
+                // preloade the image's and hidAct's pixel
                 #pragma unroll
-                for (int y = 0; y < B_X * filtersPerThread; y += (B_X * B_Y) / preloadCases) {
-                    shHidActLoad[y * (preloadCases + 1)] = haPreload[y * preloadCases / (B_X * B_Y)];
+                for (int r = 0; r < 8; r++) {
+                    imPreload[r] = tex1Dfetch<float>(images, imgOffset2 + (r) * 8 * imgPixels * imgStride);
+                    haPreload[r] = tex1Dfetch<float>(hidActs, hidActsOffset2 + (r) * 8 * numImages * numModules);
                 }
 
                 __syncthreads();
-
+                // put together the instructions of same type to improve instruction-level parallelism
                 #pragma unroll
-                for (int z = 0; z < 8; ++z) {
-                    WA_IMLOAD_TX(z);
-                    WA_LOOP2(z);
+                for (int r = 0; r < 16; r++) {
+                    for (int c = 0; c < 4; c++) { 
+                        prod[0][c] += shImages[r][ty + c * B_Y].x * shHidActs[(r)][tx].x; 
+                        prod[1][c] += shImages[r][ty + c * B_Y].x * shHidActs[(r)][tx].y; 
+                        prod[2][c] += shImages[r][ty + c * B_Y].x * shHidActs[(r)][tx + B_X].x; 
+                        prod[3][c] += shImages[r][ty + c * B_Y].x * shHidActs[(r)][tx + B_X].y; 
+                        prod[0][c+4] += shImages[r][ty + c * B_Y].y * shHidActs[(r)][tx].x; 
+                        prod[1][c+4] += shImages[r][ty + c * B_Y].y * shHidActs[(r)][tx].y; 
+                        prod[2][c+4] += shImages[r][ty + c * B_Y].y * shHidActs[(r)][tx + B_X].x; 
+                        prod[3][c+4] += shImages[r][ty + c * B_Y].y * shHidActs[(r)][tx + B_X].y; 
+                    }
                 }
 
-                #pragma unroll
-                for (int z = 0; z < 8; ++z) {
-                    WA_HALOAD_TX(z);
-                    WA_LOOP2(z+8);
-                }
                 __syncthreads();
             }
         }
@@ -1789,6 +1825,18 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_6_r_32(cu
     }
 }
 
+/*****************************Function Revision Record*****************************
+ * Author: Tencent BestImage Team(ankerguo@tencent.com)                           *
+ * Date:   2015-05-18                                                             *
+ * Reason: Optimizing kernel to get faster speed according to GPU features        *
+ * Method:                                                                        *
+ *         1. reorganizing data structure to avoid bank conflict;                 *
+ *         2. using vectorized data type;                                         *
+ *         3. improving instruction-level parallelism;                            *
+ *         4. removing redundant 'if' branches;                                   *
+ *         5. removing local variables to save registers.                         *
+ *********************************************************************************/
+
 /*
  * images:      (numImgColors, imgSizeY, imgSizeX, numImages), with stride given
  * hidActs:     (numFilters, numModulesY, numModulesX, numImages)
@@ -1804,20 +1852,24 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_8_r_16(cu
                                        const int paddingStart, const int moduleStride, const int imgStride,
                                        const int numImgColors, const int numGroups, const int sumWidth,
                                        const float scaleTargets, const float scaleOutputs) {
-    __shared__ float shImages[colorsPerThread * B_Y][preloadCases]; // preload preloadCases cases
-    __shared__ float shHidActs[filtersPerThread * B_X][preloadCases + 1]; // preload preloadCases cases of B_X hidacts
+    // avoid bank conflict by re-organizing the data structure, and improve band width by using 'float2' instead of 'float'
+    __shared__ float2 shImages[preloadCases][colorsPerThread * B_Y / 2 + 2]; // preload preloadCases cases
+    __shared__ float2 shHidActs[preloadCases][filtersPerThread * B_X / 2 + 2]; // preload preloadCases cases of B_X hidacts
+    const int tx = threadIdx.x % B_X, ty = threadIdx.y % B_Y;
+    //const int tidx = B_X * threadIdx.y + threadIdx.x;
+    // reduce two registers
+    //const int loadY = tidx / preloadCases, loadX = tidx % preloadCases;
 
-    const int tidx = B_X * threadIdx.y + threadIdx.x;
-    const int loadY = tidx / preloadCases, loadX = tidx % preloadCases;
-
-    const int filterPixels = filterSize * filterSize;
+    //const int filterPixels = filterSize * filterSize;
+    // reduce one register
+    const int filterPixelsAll = numFilters * filterSize * filterSize;
     const int imgPixels = imgSizeY * imgSizeX;
 
     const int numFilterBlocks = numFilters / (B_X * filtersPerThread);
     const int blockModuleChunkIdx = blockIdx.x / numFilterBlocks;
 
     const int numModuleChunksX = DIVUP(numModulesX, sumWidth);
-//    const int numModuleChunksY = DIVUP(numModulesY, sumWidth);
+    // const int numModuleChunksY = DIVUP(numModulesY, sumWidth);
 
     const int blockModuleChunkX = blockModuleChunkIdx % numModuleChunksX;
     const int blockModuleChunkY = blockModuleChunkIdx / numModuleChunksX;
@@ -1825,7 +1877,7 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_8_r_16(cu
     const int blockModuleStartX = blockModuleChunkX * sumWidth;
     const int blockModuleStartY = blockModuleChunkY * sumWidth;
 
-//    const int moduleIdx = partialSum * outputModuleIdx;
+    // const int moduleIdx = partialSum * outputModuleIdx;
     const int blockFilterIdx = filtersPerThread * B_X * (blockIdx.x % numFilterBlocks);
     const int numModules = numModulesY * numModulesX;
 
@@ -1837,33 +1889,37 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_8_r_16(cu
     const int blockPixelY = blockPixelOffset / filterSize, blockPixelX = blockPixelOffset % filterSize;
     const int blockFilterColorIdx = blockIdx.y  * B_Y * colorsPerThread;
     const int imgColorIdx = blockFilterColorIdx + blockGroupIdx * numFilterColors;
-    const int imgOffset = (imgColorIdx + loadY) * imgPixels * imgStride + loadX;
-//    images += (imgColorIdx + loadY) * imgPixels * imgStride + loadX;
+    const int imgOffset = (imgColorIdx + (ty * B_X + tx) / preloadCases) * imgPixels * imgStride + (ty * B_X + tx) % preloadCases;
+    // images += (imgColorIdx + loadY) * imgPixels * imgStride + loadX;
     const int hidActsOffset = blockFilterIdx * numImages * numModules
-            + loadY * numImages * numModules
-            + loadX;
-//
-//    hidActs +=
-//             blockFilterIdx * numImages * numModules
-//            + loadY * numImages * numModules
-//            + loadX;
+            + ((ty * B_X + tx) / preloadCases) * numImages * numModules
+            + ((ty * B_X + tx) % preloadCases);
+    //
+    // hidActs +=
+    //             blockFilterIdx * numImages * numModules
+    //            + loadY * numImages * numModules
+    //            + loadX;
 
-    targets += blockModuleChunkIdx * numFilters * filterPixels * numFilterColors
-            + (blockFilterColorIdx + threadIdx.y) * filterPixels * numFilters
+    // usie one temporary register instead of multiple registers
+    const int pIdxBase = imgStride * ((paddingStart + blockPixelY) * imgSizeX + paddingStart + blockPixelX);
+
+    targets += blockModuleChunkIdx * numFilters * filterSize * filterSize * numFilterColors
+            + (blockFilterColorIdx + ty) * filterSize * filterSize * numFilters
             + blockPixelOffset * numFilters
             + blockFilterIdx
-            + threadIdx.x;
-//    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0) return;
+            + tx;
+    // if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0) return;
 
     const int mStartX = max(blockModuleStartX, DIVUP(-blockPixelX - paddingStart, moduleStride));
     const int mStartY = max(blockModuleStartY, DIVUP(-blockPixelY - paddingStart, moduleStride));
     const int mEndX = min(numModulesX, min(blockModuleStartX + sumWidth, DIVUP(imgSizeX - blockPixelX - paddingStart, moduleStride)));
     const int mEndY = min(numModulesY, min(blockModuleStartY + sumWidth, DIVUP(imgSizeY - blockPixelY - paddingStart, moduleStride)));
 
+    // reduce 3 registers
     const bool doWork = mStartY < mEndY && mStartX < mEndX;
 
-    float* shHidActLoad = &shHidActs[loadY][loadX];
-    float* shImgLoad = &shImages[loadY][loadX];
+    //float* shHidActLoad = &shHidActs[loadY][loadX];
+    //float* shImgLoad = &shImages[loadY][loadX];
 
     float imPreload[preloadCases*colorsPerThread/B_X]; // [4]
     float haPreload[preloadCases*filtersPerThread/B_Y]; // [8]
@@ -1877,115 +1933,105 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_8_r_16(cu
             prod[f][c] = 0;
         }
     }
-    int pixIdx, pixIdxNext, m, mNext;
+    //int pixIdx, pixIdxNext, m, mNext;
 
-    conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_8_r_16_setCoords(
-            mStartY, mStartX, paddingStart, numModulesX, moduleStride,
-            blockPixelY, blockPixelX, imgSizeX, imgStride,
-            pixIdx, m);
+    //conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_8_r_16_setCoords(
+    //        mStartY, mStartX, paddingStart, numModulesX, moduleStride,
+    //        blockPixelY, blockPixelX, imgSizeX, imgStride,
+    //        pixIdx, m);
+    
+    const int pixIdx = pIdxBase + (mStartY * imgSizeX + mStartX) * moduleStride * imgStride;
+    const int m = (mStartY * numModulesX + mStartX);
 
-    if (doWork && loadY < B_Y * colorsPerThread) {
+    // preload the image's pixel 
+    if (doWork && (ty * B_X + tx) / preloadCases < (B_Y * colorsPerThread / 4)) {
         #pragma unroll
-        for (int y = 0; y < B_Y * colorsPerThread; y += (B_X * B_Y) / preloadCases) {
-            imPreload[y * preloadCases/(B_X * B_Y)] = tex1Dfetch<float>(images, imgOffset + y * imgPixels * imgStride + pixIdx);
+        for (int i = 0; i < 4; i++) {
+            imPreload[i] = tex1Dfetch<float>(images, imgOffset + 16 * i * imgPixels * imgStride + pixIdx);
         }
     }
 
-    if (doWork && loadY < B_X * filtersPerThread) {
+    // preload the hidAct's pixel
+    if (doWork && (ty * B_X + tx) / preloadCases < (B_X * filtersPerThread) / 8) {
         #pragma unroll
-        for (int y = 0; y < B_X * filtersPerThread; y += (B_X * B_Y) / preloadCases) {
-            haPreload[y * preloadCases / (B_X * B_Y)] = tex1Dfetch<float>(hidActs, hidActsOffset + y * numImages * numModules + m * numImages);
+        for (int i = 0; i < 8; i++) {
+            haPreload[i] = tex1Dfetch<float>(hidActs, hidActsOffset + 16 * i * numImages * numModules + m * numImages);
         }
     }
 
     for (int my = mStartY; my < mEndY; my++) {
         for (int mx = mStartX; mx < mEndX; mx++) {
-            int myNext = my, mxNext = mx;
-            const bool lastModule = my == mEndY - 1 && mx == mEndX - 1;
-
-            if (!lastModule) {
-                mxNext = mx + 1 == mEndX ? mStartX : mx + 1;
-                myNext = my + (mx + 1 == mEndX);
-            }
-
-            conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_8_r_16_setCoords(
-                    myNext, mxNext, paddingStart, numModulesX, moduleStride,
-                    blockPixelY, blockPixelX, imgSizeX, imgStride,
-                    pixIdxNext, mNext);
 
             for (int caseIdx = 0; caseIdx < numImages; caseIdx += preloadCases) {
-
-//                const float* im = &images[caseIdx + preloadCases + pixIdx];
-                int imgOffset2 = imgOffset + caseIdx + preloadCases + pixIdx;
-                int hidActsOffset2 = hidActsOffset + caseIdx + preloadCases + m * numImages;
-//                const float* ha = &hidActs[caseIdx + preloadCases + m * numImages];
+                int imgOffset2 = imgOffset + caseIdx + preloadCases + pIdxBase + (my * imgSizeX + mx) * moduleStride * imgStride;
+                int hidActsOffset2 = hidActsOffset + caseIdx + preloadCases + (my * numModulesX + mx) * numImages;
 
                 if (caseIdx + preloadCases == numImages) {
-                    pixIdx = pixIdxNext;
-                    m = mNext;
-//                    im = &images[pixIdxNext];
-                    imgOffset2 = imgOffset + pixIdxNext;
-                    hidActsOffset2 = hidActsOffset + mNext * numImages;
+                    const int mxNext = mx + 1 == mEndX ? mStartX : mx + 1;
+                    const int myNext = my + (mx + 1 == mEndX);
 
-//                    ha = &hidActs[mNext * numImages];
+                    imgOffset2 = imgOffset + + pIdxBase + (myNext * imgSizeX + mxNext) * moduleStride * imgStride;
+                    hidActsOffset2 = hidActsOffset + (myNext * numModulesX + mxNext) * numImages;
                 }
 
-                if (loadY < B_Y * colorsPerThread) {
-                    #pragma unroll
-                    for (int y = 0; y < B_Y * colorsPerThread; y += (B_X * B_Y) / preloadCases) {
-                        shImgLoad[(y) * preloadCases] = imPreload[y * preloadCases / (B_X * B_Y)];
-                    }
+                if ((ty * B_X + tx) / preloadCases < (B_Y * colorsPerThread / 4)) {
+                    // store the previousely preloaded pixel into shared memory
+                    shImages[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases].x = imPreload[0];
+                    shImages[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases].y = imPreload[2];
+                    shImages[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases + 16].x = imPreload[1];
+                    shImages[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases + 16].y = imPreload[3];
+		}
+
+                if ((ty * B_X + tx) / preloadCases < (B_X * filtersPerThread / 8)) {
+                    shHidActs[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases].x = haPreload[0];
+                    shHidActs[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases].y = haPreload[2];
+                    shHidActs[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases + 32].x = haPreload[4];
+                    shHidActs[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases + 32].y = haPreload[6];
+                    shHidActs[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases + 16].x = haPreload[1];
+                    shHidActs[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases + 16].y = haPreload[3];
+                    shHidActs[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases + 48].x = haPreload[5];
+                    shHidActs[(ty * B_X + tx) % preloadCases][(ty * B_X + tx) / preloadCases + 48].y = haPreload[7];
+		}
+
+                #pragma unroll
+                for (int r = 0; r < 8; r++) {
+                    haPreload[r] = tex1Dfetch<float>(hidActs, hidActsOffset2 + r * 16 * numImages * numModules);
                 }
 
-                if (loadY < B_X * filtersPerThread) {
-                    #pragma unroll
-                    for (int y = 0; y < B_X * filtersPerThread; y += (B_X * B_Y) / preloadCases) {
-                        shHidActLoad[y * (preloadCases + 1)] = haPreload[y * preloadCases / (B_X * B_Y)];
-                    }
+                #pragma unroll
+                for (int r = 0; r < 4; r++) {
+                    imPreload[r] = tex1Dfetch<float>(images, imgOffset2 + r * 16 * imgPixels * imgStride);
                 }
-
                 __syncthreads();
 
-                WA_LOOP(0);
-                WA_IMLOAD_TX(0);
-                WA_LOOP(1);
-                WA_IMLOAD_TX(1);
-                WA_LOOP(2);
-                WA_IMLOAD_TX(2);
-                WA_LOOP(3);
-                WA_IMLOAD_TX(3);
-                WA_LOOP(4);
-                WA_HALOAD_TX(0);
-                WA_LOOP(5);
-                WA_HALOAD_TX(1);
-                WA_LOOP(6);
-                WA_HALOAD_TX(2);
-                WA_LOOP(7);
-                WA_HALOAD_TX(3);
-                WA_LOOP(8);
-                WA_HALOAD_TX(4);
-                WA_LOOP(9);
-                WA_HALOAD_TX(5);
-                WA_LOOP(10);
-                WA_HALOAD_TX(6);
-                WA_LOOP(11);
-                WA_HALOAD_TX(7);
-                WA_LOOP(12);
-                WA_LOOP(13);
-                WA_LOOP(14);
-                WA_LOOP(15);
+                // put together the instructions of same type to improve instruction-level parallelism
+                // calculate the derivative of the hidAct with respect to weight
+                #pragma unroll
+                for (int r = 0; r < 16; r++) {
+                    #pragma unroll
+                    for (int c = 0; c < 4; c++) { 
+                        prod[0][c] += shImages[r][ty + c * B_Y].x * shHidActs[r][tx].x; 
+                        prod[1][c] += shImages[r][ty + c * B_Y].x * shHidActs[r][tx].y; 
+                        prod[2][c] += shImages[r][ty + c * B_Y].x * shHidActs[r][tx + B_X].x; 
+                        prod[3][c] += shImages[r][ty + c * B_Y].x * shHidActs[r][tx + B_X].y; 
+                        prod[0][c+4] += shImages[r][ty + c * B_Y].y * shHidActs[r][tx].x; 
+                        prod[1][c+4] += shImages[r][ty + c * B_Y].y * shHidActs[r][tx].y; 
+                        prod[2][c+4] += shImages[r][ty + c * B_Y].y * shHidActs[r][tx + B_X].x; 
+                        prod[3][c+4] += shImages[r][ty + c * B_Y].y * shHidActs[r][tx + B_X].y; 
+                    }
+                }    
 
                 __syncthreads();
-            }
-        }
-    }
+            } 
+        } 
+    } 
 
     if (scale) {
         #pragma unroll
         for (int c = 0; c < colorsPerThread; c++) {
             #pragma unroll
             for (int f = 0; f < filtersPerThread; f++) {
-                targets[c * B_Y * filterPixels * numFilters + f * B_X] = scaleTargets * targets[c * B_Y * filterPixels * numFilters + f * B_X] + scaleOutputs * prod[f][c];
+                targets[c * B_Y * filterPixelsAll + f * B_X] = scaleTargets * targets[c * B_Y * filterPixelsAll + f * B_X] + scaleOutputs * prod[f][c];
             }
         }
     } else {
@@ -1993,7 +2039,7 @@ __global__ void conv_weight_acts_mc_mf_kepler_preload_ty_8_tx_32_f_4_c_8_r_16(cu
         for (int c = 0; c < colorsPerThread; c++) {
             #pragma unroll
             for (int f = 0; f < filtersPerThread; f++) {
-                targets[c * B_Y * filterPixels * numFilters + f * B_X] = scaleOutputs * prod[f][c];
+                targets[c * B_Y * filterPixelsAll + f * B_X] = scaleOutputs * prod[f][c];
             }
         }
     }
@@ -2127,6 +2173,8 @@ void _weightActs(NVMatrix& images, NVMatrix& hidActs, NVMatrix& targets,
         assert(targets.getNumCols() == targetSize.second);
     }
     cudaStream_t stream = NVMatrix::getDefaultStream();
+    
+    checkCudaErrors(cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte));
 
     if (scale == false) {
         if (checkCaseBounds == false) {
@@ -2660,7 +2708,7 @@ void _weightActs(NVMatrix& images, NVMatrix& hidActs, NVMatrix& targets,
             }
         }
     }
-
+    checkCudaErrors(cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeFourByte));
     getLastCudaError("weightActs: kernel execution failed");
 }
 

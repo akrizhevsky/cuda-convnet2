@@ -601,6 +601,18 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4(float* im
     }
 }
 
+/*****************************Function Revision Record*****************************
+ * Author: Tencent BestImage Team(ankerguo@tencent.com)                           *
+ * Date:   2015-05-18                                                             *
+ * Reason: Optimizing kernel to get faster speed according to GPU features        *
+ * Method:                                                                        *
+ *         1. reorganizing data structure to avoid bank conflict;                 *
+ *         2. using vectorized data type;                                         *
+ *         3. improving instruction-level parallelism;                            *
+ *         4. removing redundant 'if' branches;                                   *
+ *         5. removing local variables to save registers.                         *
+ *********************************************************************************/
+
 /*
  * images:      (numImgColors, imgSizeY, imgSizeX, numImages) with stride given
  * filters:     (numFilterColors, filterPixels, numFilters) if conv
@@ -611,7 +623,9 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4(float* im
  */
 template <int B_Y, int B_X, int imgsPerThread, int filtersPerThread, int colorCache,
           bool scale, bool checkImgBounds>
-__global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaTextureObject_t images, cudaTextureObject_t filters, float* targets,
+__global__ void 
+__launch_bounds__(128, 4)
+filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaTextureObject_t images, cudaTextureObject_t filters, float* targets,
                                        const int numImages, const int numFilters,
                                        const int imgSizeY, const int imgSizeX, const int filterSize, const int paddingStart,
                                        const int moduleStride,
@@ -619,8 +633,9 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaT
                                        const int numGroups,
                                        const float scaleTargets, const float scaleOutputs,
                                        const bool conv/*, const bool noloads*/) {
-    __shared__ float shFilters[colorCache][B_Y * filtersPerThread]; // pre-load 1 pixel from B_Y*filtersPerThread filters
-    __shared__ float shImages[colorCache][B_X * imgsPerThread]; // pre-load 1 pixel from B_X*imgsPerThread images
+    // avoid bank conflict by reorganizing the data structure and improve the band width by using 'float2' instead of 'float'
+    __shared__ float2 shFilters[colorCache / 2][B_Y * filtersPerThread]; // pre-load 1 pixel from B_Y*filtersPerThread filters
+    __shared__ float2 shImages[colorCache][B_X * imgsPerThread / 2]; // pre-load 1 pixel from B_X*imgsPerThread images
     const int imgPixels = imgSizeY * imgSizeX;
     const int filterPixels = filterSize * filterSize;
     const int numFilterColors = numImgColors / numGroups;
@@ -636,19 +651,20 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaT
     // in the range 0..31. It appears that this allows the compiler to optimize?
     const int tx = threadIdx.x % B_X;
     const int ty = threadIdx.y % B_Y;
-    const int tidx = ty * B_X + threadIdx.x;
+    //const int tidx = ty * B_X + threadIdx.x; // reduce one register
 
     const int imgLoadModPosY = paddingStart + (moduleIdx / numModulesX) * moduleStride;
     const int imgLoadModPosX = paddingStart + (moduleIdx % numModulesX) * moduleStride;
 
-    const int shFilterLoadY = tidx / (B_Y * filtersPerThread);
-    const int shFilterLoadX = tidx % (B_Y * filtersPerThread);
-    const int myImgIdx = blockIdx.x * B_X * imgsPerThread + threadIdx.x;
-    const int imgOffset = (blockColorIdx + threadIdx.y) * imgPixels * imgStride + myImgIdx;
+    // reduce two registers
+    //const int shFilterLoadY = tidx / (B_Y * filtersPerThread);
+    //const int shFilterLoadX = tidx % (B_Y * filtersPerThread);
+    const int myImgIdx = blockIdx.x * B_X * imgsPerThread + tx;
+    const int imgOffset = (blockColorIdx + ty) * imgPixels * imgStride + myImgIdx;
 
 //    images += (blockColorIdx + threadIdx.y) * imgPixels * imgStride + myImgIdx;
     const int filterOffset = blockFilterIdx
-            + shFilterLoadY * numFilters * filterPixels + shFilterLoadX + (conv ? 0 : moduleIdx * numFilterColors * filterPixels * numFilters);
+            + ((ty * B_X + tx) / (B_Y * filtersPerThread)) * numFilters * filterPixels + ((ty * B_X + tx) % (B_Y * filtersPerThread)) + (conv ? 0 : moduleIdx * numFilterColors * filterPixels * numFilters);
 //    filters +=blockFilterIdx
 //            + shFilterLoadY * numFilters * filterPixels + shFilterLoadX;
 //    if (!conv) {
@@ -659,6 +675,8 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaT
             + (blockFilterIdx + threadIdx.y * filtersPerThread) * numImages * numModules
             + myImgIdx;
 
+    // combine two registers into one
+    const int numModImages = numModules * numImages;
     float prod[imgsPerThread][filtersPerThread];
 //    float fCache[filtersPerThread];
     #pragma unroll
@@ -682,19 +700,15 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaT
 
     filterActs_YxX_sparse2_preload_ty_4_tx_32_f_16_c_4_setPixelCoords(filterSize, imgSizeX, imgLoadModPosY, imgLoadModPosX, imgStartY, imgStartX, fPidx, iPidx);
 
+    // remove redundant conditions
     #pragma unroll
     for (int i = 0; i < imgsPerThread; i++) {
-        if (!checkImgBounds || myImgIdx + i * B_X < numImages) {
-            imPreload[i] = tex1Dfetch<float>(images, imgOffset + imgStride * iPidx + i * B_X);
-        } else {
-            imPreload[i] = 0;
-        }
+        imPreload[i]  = tex1Dfetch<float>(images, imgOffset + imgStride * iPidx + i * B_X);
     }
-    if (/*B_X % filtersPerThread == 0 ||*/ shFilterLoadY < B_X/filtersPerThread) { // This if statement reduces reg usage..
-        #pragma unroll
-        for (int c = 0; c < colorCache; c += B_X/filtersPerThread) {
-            fPreload[c*filtersPerThread/B_X] = tex1Dfetch<float>(filters, filterOffset + (c * filterPixels + fPidx) * numFilters);
-        }
+
+    #pragma unroll
+    for (int c = 0; c < colorCache; c += B_X/filtersPerThread) {
+        fPreload[c*filtersPerThread/B_X] = tex1Dfetch<float>(filters, filterOffset + (c * filterPixels + fPidx) * numFilters);
     }
     for (int imgY = imgStartY; imgY < imgEndY; ++imgY) {
 //        const int filterPxY = imgY - imgLoadModPosY;
@@ -714,8 +728,14 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaT
             }
             filterActs_YxX_sparse2_preload_ty_4_tx_32_f_16_c_4_setPixelCoords(filterSize, imgSizeX, imgLoadModPosY, imgLoadModPosX, imgYNext, imgXNext, fPidxNext, iPidxNext);
             for (int oc = 0; oc < numFilterColors; oc += colorCache) { // oc stands for outer color (loop)
-//                const float* ff = &filters[numFilters * ((oc + colorCache) * filterPixels + fPidx)];
-//                const float* mm = &images[imgStride * ((oc + colorCache) * imgPixels + iPidx)];
+                // store the preloaded pixel of filter and image into shared memory
+                shFilters[(ty * B_X + tx) / (B_Y * filtersPerThread)][(ty * B_X + tx) % (B_Y * filtersPerThread)].x = fPreload[0];
+                shFilters[(ty * B_X + tx) / (B_Y * filtersPerThread)][(ty * B_X + tx) % (B_Y * filtersPerThread)].y = fPreload[1];
+                shImages[ty][tx].x = imPreload[0];
+                shImages[ty][tx].y = imPreload[1];                
+                shImages[ty][tx+B_X].x = imPreload[2]; 
+                shImages[ty][tx+B_X].y = imPreload[3];
+
                 int imgOffset2 = imgOffset + imgStride * ((oc + colorCache) * imgPixels + iPidx);
                 int filterOffset2 = filterOffset + numFilters * ((oc + colorCache) * filterPixels + fPidx);
                 if (oc == numFilterColors - colorCache) {
@@ -725,57 +745,30 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaT
                     iPidx = iPidxNext;
                 }
 
-                #pragma unroll
-                for (int c = 0; c < colorCache; c += B_X/filtersPerThread) {
-                    shFilters[c + shFilterLoadY][shFilterLoadX] = fPreload[c*filtersPerThread/B_X];
-                }
-
-                #pragma unroll
-                for (int i = 0; i < imgsPerThread; i++) {
-                    // NOTE: bank conflicts here!
-                    shImages[ty][tx * imgsPerThread + i] = imPreload[i];
-                }
-                imPreload[0] = (checkImgBounds && myImgIdx + 0 * B_X >= numImages) ? 0 : tex1Dfetch<float>(images, imgOffset2 + 0 * B_X);
-                imPreload[1] = (checkImgBounds && myImgIdx + 1 * B_X >= numImages) ? 0 : tex1Dfetch<float>(images, imgOffset2 + 1 * B_X);
-                imPreload[2] = (checkImgBounds && myImgIdx + 2 * B_X >= numImages) ? 0 : tex1Dfetch<float>(images, imgOffset2 + 2 * B_X);
+                // preload one pixel of filter and image from texture, and no need to check 'checkImgBounds' with all callers setting it as false
+                imPreload[0] = tex1Dfetch<float>(images, imgOffset2);
+                imPreload[1] = tex1Dfetch<float>(images, imgOffset2 + B_X);
+                imPreload[2] = tex1Dfetch<float>(images, imgOffset2 + 2 * B_X);
+                imPreload[3] = tex1Dfetch<float>(images, imgOffset2 + 3 * B_X);
+                fPreload[0] = tex1Dfetch<float>(filters, filterOffset2);
+                fPreload[1] = tex1Dfetch<float>(filters, filterOffset2 + 2 * filterPixels * numFilters);
 
                 __syncthreads();
 
-                #pragma unroll
-                for(int i = 0; i < imgsPerThread; i++) {
+                // put together the instructions with same type to improve instruction-level parallelism 
+                // calculate the convolution between images and filters
+                #pragma unroll 
+                for (int f = 0; f < filtersPerThread; f++) {
                     #pragma unroll
-                    for(int f = 0; f < filtersPerThread; f++) {
-                        prod[i][f] += shImages[0][threadIdx.x * imgsPerThread + i] * shFilters[0][threadIdx.y * filtersPerThread + f];
-                    }
-                }
-
-                fPreload[0] = tex1Dfetch<float>(filters, filterOffset2 + 0);
-
-                #pragma unroll
-                for(int i = 0; i < imgsPerThread; i++) {
-                    #pragma unroll
-                    for(int f = 0; f < filtersPerThread; f++) {
-                        prod[i][f] += shImages[1][threadIdx.x * imgsPerThread + i] * shFilters[1][threadIdx.y * filtersPerThread + f];
-                    }
-                }
-
-                fPreload[1] = tex1Dfetch<float>(filters, filterOffset2 + (B_X/filtersPerThread * filterPixels) * numFilters);
-
-                #pragma unroll
-                for(int i = 0; i < imgsPerThread; i++) {
-                    #pragma unroll
-                    for(int f = 0; f < filtersPerThread; f++) {
-                        prod[i][f] += shImages[2][threadIdx.x * imgsPerThread + i] * shFilters[2][threadIdx.y * filtersPerThread + f];
-                    }
-                }
-
-                imPreload[3] = (checkImgBounds && myImgIdx + 3 * B_X >= numImages) ? 0 : tex1Dfetch<float>(images, imgOffset2 + 3 * B_X);
-
-                #pragma unroll
-                for(int i = 0; i < imgsPerThread; i++) {
-                    #pragma unroll
-                    for(int f = 0; f < filtersPerThread; f++) {
-                        prod[i][f] += shImages[3][threadIdx.x * imgsPerThread + i] * shFilters[3][threadIdx.y * filtersPerThread + f];
+                    for (int r = 0; r < colorCache / 2; r++) {
+                        prod[0][f] += shImages[r][tx].x      * shFilters[r][ty*filtersPerThread+f].x;
+                        prod[1][f] += shImages[r][tx].y      * shFilters[r][ty*filtersPerThread+f].x;
+                        prod[2][f] += shImages[r][tx+B_X].x   * shFilters[r][ty*filtersPerThread+f].x;
+                        prod[3][f] += shImages[r][tx+B_X].y   * shFilters[r][ty*filtersPerThread+f].x;
+                        prod[0][f] += shImages[r+2][tx].x    * shFilters[r][ty*filtersPerThread+f].y;
+                        prod[1][f] += shImages[r+2][tx].y    * shFilters[r][ty*filtersPerThread+f].y;
+                        prod[2][f] += shImages[r+2][tx+B_X].x * shFilters[r][ty*filtersPerThread+f].y;
+                        prod[3][f] += shImages[r+2][tx+B_X].y * shFilters[r][ty*filtersPerThread+f].y;
                     }
                 }
                 __syncthreads();
@@ -788,9 +781,8 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaT
         for (int f = 0; f < filtersPerThread; f++) {
             #pragma unroll
             for (int i = 0; i < imgsPerThread; i++) {
-                if (!checkImgBounds || myImgIdx + i * B_X < numImages) {
-                    targets[i * B_X + f * numImages * numModules] = scaleTargets * targets[i * B_X + f * numImages * numModules] + scaleOutputs * prod[i][f];
-                }
+                // remove the redundant condition for less registers
+                targets[i * B_X + f * numModImages] = scaleTargets * targets[i * B_X + f * numModImages] + scaleOutputs * prod[i][f];
             }
         }
     } else {
@@ -799,9 +791,8 @@ __global__ void filterActs_YxX_sparse2_preload_ty_4_tx_32_i_4_f_16_c_4_tex(cudaT
         for (int i = 0; i < imgsPerThread; i++) {
             #pragma unroll
             for (int f = 0; f < filtersPerThread; f++) {
-                if (!checkImgBounds || myImgIdx + i * B_X < numImages) {
-                    targets[i * B_X + f * numImages * numModules] = scaleOutputs * prod[i][f];
-                }
+                // remove the redundant condition for less registers
+                targets[i * B_X + f * numModImages] = scaleOutputs * prod[i][f];
             }
         }
     }
@@ -1159,6 +1150,219 @@ __global__ void filterActs_YxX_sparse2(float* images, float* filters, float* tar
     }
 }
 
+
+/*****************************Function Revision Record*****************************
+ * Author: Tencent BestImage Team(ankerguo@tencent.com)                           *
+ * Date:   2015-05-18                                                             *
+ * Reason: Optimizing kernel to get faster speed according to GPU features        *
+ * Method:                                                                        *
+ *         1. reorganizing data structure to avoid bank conflict;                 *
+ *         2. using vectorized data type;                                         *
+ * Note:   This function can be used when each thread loads even number of filter *
+ *         pixels(filtersPerThread * colorCache / B_X is even), and this can be   *
+ *         optimized more when the number of loaded image's pixel is even.        *
+ *********************************************************************************/
+template <int B_Y, int B_X, int imgsPerThread, int filtersPerThread, int colorCache,
+          bool scale, bool checkImgBounds>
+__global__ void filterActs_YxX_sparse2_f_vec(float* images, float* filters, float* targets,
+                                       const int numImages, const int numFilters,
+                                       const int imgSizeY, const int imgSizeX, const int filterSize, const int paddingStart,
+                                       const int moduleStride,
+                                       const int numModulesY, const int numModulesX, const int imgStride, const int numImgColors,
+                                       const int numGroups, 
+                                       const float scaleTargets, const float scaleOutputs,
+                                       const bool conv) {
+    // improve shared memory's band width by using 'float2' instead of 'float'
+    __shared__ float2 shFilters[colorCache/2][B_Y * filtersPerThread]; // pre-load 1 pixel from B_Y*filtersPerThread filters
+    __shared__ float shImages[colorCache][B_X * imgsPerThread]; // pre-load 1 pixel from B_X*imgsPerThread images
+
+    const int tx = threadIdx.x % B_X, ty = threadIdx.y % B_Y;
+    const int imgPixels = imgSizeY * imgSizeX;
+    const int filterPixels = filterSize * filterSize;
+    const int numFilterColors = numImgColors / numGroups;
+    const int blocksPerModule = numFilters / (B_Y*filtersPerThread);
+    const int moduleIdx = blockIdx.y / blocksPerModule;
+    const int blockFilterIdx = filtersPerThread * B_Y * (blockIdx.y % blocksPerModule);
+    const int numFiltersPerGroup = numFilters / numGroups;
+    const int blockGroupIdx = blockFilterIdx / numFiltersPerGroup;
+
+    const int numModules = numModulesX * numModulesY;
+    const int blockColorIdx = numFilterColors * blockGroupIdx;
+
+    const int tidx = ty * B_X + tx;
+
+    const int imgLoadModPosY = paddingStart + (moduleIdx / numModulesX) * moduleStride;
+    const int imgLoadModPosX = paddingStart + (moduleIdx % numModulesX) * moduleStride;
+
+    // load position of filters' pixels for current thread
+    const int shFilterLoadY = tidx / (B_Y * filtersPerThread);
+    const int shFilterLoadX = tidx % (B_Y * filtersPerThread);
+    // load position of images' pixels for current thread
+    const int shImgLoadY = tidx / (B_X * imgsPerThread);
+    const int shImgLoadX = tidx % (B_X * imgsPerThread);
+
+    const int myImgIdx = blockIdx.x * B_X * imgsPerThread + shImgLoadX;
+    images += (blockColorIdx + shImgLoadY) * imgPixels * imgStride + myImgIdx;
+
+    filters +=blockFilterIdx
+            + shFilterLoadY * numFilters * filterPixels + shFilterLoadX;
+    if (!conv) {
+        filters += moduleIdx * numFilterColors * filterPixels * numFilters;
+    }
+
+    targets += moduleIdx * numImages
+            + (blockFilterIdx + ty) * numImages * numModules
+            + blockIdx.x * B_X * imgsPerThread + tx;
+
+    float prod[filtersPerThread][imgsPerThread];
+    #pragma unroll
+    for(int f = 0; f < filtersPerThread; f++) {
+        #pragma unroll
+        for(int g = 0; g < imgsPerThread; g++) {
+            prod[f][g] = 0;
+        }
+    }
+
+    const int imgStartX = MAX(0, imgLoadModPosX);
+    const int imgStartY = MAX(0, imgLoadModPosY);
+    const int imgEndX = MIN(imgLoadModPosX + filterSize, imgSizeX);
+    const int imgEndY = MIN(imgLoadModPosY + filterSize, imgSizeY);
+
+    // temporary buffer to store the filter's loaded pixels during each loop
+    float fPreload[colorCache * filtersPerThread / B_X];
+    // temporary buffer to store the image's loaded pixels during each loop
+    float iPreload[colorCache * imgsPerThread / B_Y];
+
+    // preload filter's pixels
+    #pragma unroll
+    for (int c = 0; c < colorCache; c += B_X/filtersPerThread) {
+        fPreload[c * filtersPerThread / B_X] = filters[(c * filterPixels + (imgStartY - imgLoadModPosY) * filterSize + (imgStartX - imgLoadModPosX)) * numFilters];
+    }
+
+    // preload image's pixels
+    if (!checkImgBounds || myImgIdx < numImages) {
+        #pragma unroll
+        for (int c = 0; c < colorCache; c += B_Y / imgsPerThread) {
+            iPreload[c * imgsPerThread / B_Y] = images[(c * imgPixels + imgStartY * imgSizeX + imgStartX) * imgStride];
+        }
+    } else {
+        #pragma unroll
+        for (int c = 0; c < colorCache; c += B_Y / imgsPerThread) {
+            iPreload[c * imgsPerThread / B_Y] = 0;
+        }
+    }
+
+    for (int imgY = imgStartY; imgY < imgEndY; ++imgY) {
+        //const int filterPxY = imgY - imgLoadModPosY;
+        for (int imgX = imgStartX; imgX < imgEndX; ++imgX) {
+            for (int oc = 0; oc < numFilterColors; oc += colorCache) { // oc stands for outer color (loop)
+                // store the preloaded filter's pixels into shared memory
+                #pragma unroll
+                for (int c = 0; c < colorCache / 2; c += B_X / filtersPerThread) {
+                    shFilters[c + shFilterLoadY][shFilterLoadX].x = fPreload[c * filtersPerThread / B_X];
+                    shFilters[c + shFilterLoadY][shFilterLoadX].y = fPreload[(c + colorCache / 2) * filtersPerThread / B_X];
+                }
+
+                // store the preloaded image's pixels into shared memory
+                #pragma unroll
+                for (int c = 0; c < colorCache; c += B_Y / imgsPerThread) {
+                    shImages[c + shImgLoadY][shImgLoadX] = iPreload[c * imgsPerThread / B_Y];
+                }
+                /*
+                 * Load a pixel from B_Y*filtersPerThread filters
+                 * This condition covers the case when B_X is not divisible by filtersPerThread.
+                 * In this case, not all of the threads will participate in the loading operation.
+                 * This ensures that in each loop iteration, an integer number of rows of shFilters
+                 * are filled, which makes indexing simple.
+
+                 * nvcc is behaving in a completely insane way: removing this condition under
+                 * template parameters that guarantee it to be true actually slows down
+                 * the computation.
+                 *
+                 */
+
+                /* preload image and filter pixels' data */
+                if ((oc + colorCache) == numFilterColors) { // move to next pixel when all colors of current pixel have been finished
+                   int imgXn = (imgX < (imgEndX - 1)) ? (imgX + 1) : imgStartX; 
+                   int imgYn = imgY + (imgXn != (imgX + 1));
+
+                    #pragma unroll
+                    for (int c = 0; c < colorCache; c += B_X/filtersPerThread) {
+                        fPreload[c * filtersPerThread / B_X] = filters[(c * filterPixels + (imgYn - imgLoadModPosY) * filterSize + (imgXn - imgLoadModPosX)) * numFilters];
+                    }
+
+                    if (!checkImgBounds || myImgIdx < numImages) {
+                        #pragma unroll
+                        for (int c = 0; c < colorCache; c += B_Y / imgsPerThread) {
+                            iPreload[c * imgsPerThread / B_Y] = images[(c * imgPixels + imgYn * imgSizeX + imgXn) * imgStride];
+                        }
+                    } else {
+                        #pragma unroll
+                        for (int c = 0; c < colorCache; c += B_Y / imgsPerThread) {
+                            iPreload[c * imgsPerThread / B_Y] = 0;
+                        }
+                    }
+                } else { // move next colorCache
+                    #pragma unroll
+                    for (int c = 0; c < colorCache; c += B_X/filtersPerThread) {
+                        fPreload[c * filtersPerThread / B_X] = filters[((c + oc + colorCache) * filterPixels + (imgY - imgLoadModPosY) * filterSize + (imgX - imgLoadModPosX)) * numFilters];
+                    }
+
+                    if (!checkImgBounds || myImgIdx < numImages) {
+                        #pragma unroll
+                        for (int c = 0; c < colorCache; c += B_Y / imgsPerThread) {
+                            iPreload[c * imgsPerThread / B_Y] = images[((c + oc + colorCache) * imgPixels + imgY * imgSizeX + imgX) * imgStride];
+                        }
+                    } else {
+                        #pragma unroll
+                        for (int c = 0; c < colorCache; c += B_Y / imgsPerThread) {
+                            iPreload[c * imgsPerThread / B_Y] = 0;
+                        }
+                    }
+                }
+
+                __syncthreads();
+
+                // convolution
+                for (int c = 0; c < colorCache / 2; c++) {
+                    #pragma unroll
+                    for(int g = 0; g < imgsPerThread; g++) {
+                        #pragma unroll
+                        for(int f = 0; f < filtersPerThread; f++) {
+                            prod[f][g] += shImages[c][g * B_X + tx]      * shFilters[c][ty + f * B_Y].x;
+                            prod[f][g] += shImages[c + colorCache / 2][g * B_X + tx] * shFilters[c][ty + f * B_Y].y;
+                        }
+                    }
+                }
+                __syncthreads();
+            }
+        }
+    }
+
+    // write convolution result into global memory
+    if (scale) {
+        #pragma unroll
+        for (int g = 0; g < imgsPerThread; g++) {
+            if (!checkImgBounds || myImgIdx + g * B_X < numImages) {
+                #pragma unroll
+                for (int f = 0; f < filtersPerThread; f++) {
+                    targets[g * B_X + f * B_Y * numImages * numModules] = scaleTargets * targets[g * B_X + f * B_Y * numImages * numModules] + scaleOutputs * prod[f][g];
+                }
+            }
+        }
+    } else {
+        // Note: reversing order of these loops saves 2 registers, but costs time
+        #pragma unroll
+        for (int f = 0; f < filtersPerThread; f++) {
+            #pragma unroll
+            for (int g = 0; g < imgsPerThread; g++) {
+                if (!checkImgBounds || myImgIdx + g * B_X < numImages) {
+                    targets[g * B_X + f * B_Y * numImages * numModules] = scaleOutputs * prod[f][g];
+                }
+            }
+        }
+    }
+}
 /*
  * images:      (numImgColors, imgSizeY, imgSizeX, numImages) with stride given
  * filters:     (numFilterColors, filterPixels, numFilters)             if conv
@@ -1238,6 +1442,8 @@ __global__ void filterActs_YxX_sparse2(float* images, float* filters, float* tar
     }
     cudaStream_t stream = NVMatrix::getDefaultStream();
 
+    checkCudaErrors(cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte)); // using wider band width
+    
     // Auto-generated calling code...
     // NOTE: The calling code is set up such that if checkImgBounds is true, then imgsPerThread = 1.
     // In principle it doesn't have to be this way, and you may want to optimize for that case.
@@ -1265,8 +1471,8 @@ __global__ void filterActs_YxX_sparse2(float* images, float* filters, float* tar
                         }
                     }
                     else if (numFiltersPerGroup % 32 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 4, 8, 8, false, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 4, 8, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 4, 8, 8, false, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 4, 8, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 1 == 0) {
                         cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 4, 4, 8, false, false >, cudaFuncCachePreferShared);
@@ -1275,16 +1481,16 @@ __global__ void filterActs_YxX_sparse2(float* images, float* filters, float* tar
                 }
                 else if (numImages % 64 == 0) {
                     if (numFiltersPerGroup % 128 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 8, 32, 2, 16, 8, false, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 8, 32, 2, 16, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 8, 32, 2, 16, 8, false, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 8, 32, 2, 16, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 64 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 2, 16, 8, false, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 2, 16, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 2, 16, 8, false, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 2, 16, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 32 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 2, 8, 8, false, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 2, 8, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 2, 8, 8, false, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 2, 8, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 1 == 0) {
                         cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 2, 4, 8, false, false >, cudaFuncCachePreferShared);
@@ -1293,16 +1499,16 @@ __global__ void filterActs_YxX_sparse2(float* images, float* filters, float* tar
                 }
                 else if (numImages % 32 == 0) {
                     if (numFiltersPerGroup % 128 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 8, 32, 1, 16, 8, false, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 8, 32, 1, 16, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 8, 32, 1, 16, 8, false, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 8, 32, 1, 16, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 64 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 1, 16, 8, false, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 1, 16, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 1, 16, 8, false, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 1, 16, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 32 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 1, 8, 8, false, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 1, 8, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 1, 8, 8, false, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 1, 8, 8, false, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 1 == 0) {
                         cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 1, 4, 8, false, false >, cudaFuncCachePreferShared);
@@ -1661,8 +1867,8 @@ __global__ void filterActs_YxX_sparse2(float* images, float* filters, float* tar
                         }
                     }
                     else if (numFiltersPerGroup % 32 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 4, 8, 8, true, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 4, 8, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 4, 8, 8, true, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 4, 8, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 1 == 0) {
                         cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 4, 4, 8, true, false >, cudaFuncCachePreferShared);
@@ -1671,16 +1877,16 @@ __global__ void filterActs_YxX_sparse2(float* images, float* filters, float* tar
                 }
                 else if (numImages % 64 == 0) {
                     if (numFiltersPerGroup % 128 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 8, 32, 2, 16, 8, true, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 8, 32, 2, 16, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 8, 32, 2, 16, 8, true, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 8, 32, 2, 16, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 64 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 2, 16, 8, true, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 2, 16, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 2, 16, 8, true, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 2, 16, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 32 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 2, 8, 8, true, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 2, 8, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 2, 8, 8, true, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 2, 8, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 1 == 0) {
                         cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 2, 4, 8, true, false >, cudaFuncCachePreferShared);
@@ -1689,16 +1895,16 @@ __global__ void filterActs_YxX_sparse2(float* images, float* filters, float* tar
                 }
                 else if (numImages % 32 == 0) {
                     if (numFiltersPerGroup % 128 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 8, 32, 1, 16, 8, true, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 8, 32, 1, 16, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 8, 32, 1, 16, 8, true, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 8, 32, 1, 16, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 64 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 1, 16, 8, true, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 1, 16, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 1, 16, 8, true, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 1, 16, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 32 == 0) {
-                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 1, 8, 8, true, false >, cudaFuncCachePreferShared);
-                        filterActs_YxX_sparse2 < 4, 32, 1, 8, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
+                        cudaFuncSetCacheConfig(filterActs_YxX_sparse2_f_vec < 4, 32, 1, 8, 8, true, false >, cudaFuncCachePreferShared);
+                        filterActs_YxX_sparse2_f_vec < 4, 32, 1, 8, 8, true, false > <<<blocks, threads, 0, stream>>>(images.getDevData(), filters.getDevData(), targets.getDevData(), numImages, numFilters, imgSizeY, imgSizeX, filterSize, paddingStart, moduleStride, numModulesY, numModulesX, imgStride, numImgColors, numGroups, scaleTargets, scaleOutput, conv);
                     }
                     else if (numFiltersPerGroup % 1 == 0) {
                         cudaFuncSetCacheConfig(filterActs_YxX_sparse2 < 4, 32, 1, 4, 8, true, false >, cudaFuncCachePreferShared);
@@ -2034,6 +2240,7 @@ __global__ void filterActs_YxX_sparse2(float* images, float* filters, float* tar
             }
         }
     }
+    checkCudaErrors(cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeFourByte));
 
     getLastCudaError("filterActs: kernel execution failed");
 }
