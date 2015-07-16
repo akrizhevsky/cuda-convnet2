@@ -46,6 +46,7 @@ You can see that most arguments have default values, so you don't have to provid
 # What they mean #
 
 First the optional arguments:
+
 | **Argument** | **Meaning** |
 |:-------------|:------------|
 | `--check-grads` | [Check the gradients](CheckingGradients.md) |
